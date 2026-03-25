@@ -25,11 +25,11 @@ func (m modernTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) 
 	case theme.ColorNameHover:
 		return color.NRGBA{R: 0x2a, G: 0x2a, B: 0x30, A: 0xff}
 	case theme.ColorNameFocus:
-		return color.NRGBA{R: 0x00, G: 0xe6, B: 0x76, A: 0x40} // Neo green with alpha
+		return color.NRGBA{R: 0x0a, G: 0x84, B: 0xff, A: 0x40} // Blue with alpha
 	case theme.ColorNameSelection:
-		return color.NRGBA{R: 0x00, G: 0xe6, B: 0x76, A: 0x40}
+		return color.NRGBA{R: 0x0a, G: 0x84, B: 0xff, A: 0x40}
 	case theme.ColorNamePrimary:
-		return color.NRGBA{R: 0x00, G: 0xe6, B: 0x76, A: 0xff} // Neo green accent
+		return color.NRGBA{R: 0x0a, G: 0x84, B: 0xff, A: 0xff} // Blue accent
 	case theme.ColorNameForeground:
 		return color.NRGBA{R: 0xf5, G: 0xf5, B: 0xf5, A: 0xff} // Off-white text
 	case theme.ColorNameMenuBackground:
@@ -37,9 +37,9 @@ func (m modernTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) 
 	case theme.ColorNameSeparator:
 		return color.NRGBA{R: 0x2a, G: 0x2a, B: 0x30, A: 0xff}
 	case theme.ColorNameError:
-		return color.NRGBA{R: 0xf4, G: 0x43, B: 0x36, A: 0xff}
+		return color.NRGBA{R: 0xf4, G: 0x43, B: 0x36, A: 0xff} // Red
 	case theme.ColorNameSuccess:
-		return color.NRGBA{R: 0x00, G: 0xe6, B: 0x76, A: 0xff} // Neo green
+		return color.NRGBA{R: 0x0a, G: 0x84, B: 0xff, A: 0xff} // Blue
 	case theme.ColorNameScrollBar:
 		return color.NRGBA{R: 0x33, G: 0x33, B: 0x38, A: 0x99}
 	case theme.ColorNameInputBackground:
