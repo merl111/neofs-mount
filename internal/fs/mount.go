@@ -69,8 +69,12 @@ func Mount(p MountParams) (*MountedFS, error) {
 		uploadTracker:     p.UploadTracker,
 	}
 
-	entryTTL := 5 * time.Second
-	attrTTL := 5 * time.Second
+	// Use long kernel-level TTLs: NeoFS objects are immutable, so stale dentry/attr
+	// entries just mean slightly old data — identical to how goofys handles S3.
+	// Short TTLs (5s) cause the kernel to re-ask FUSE on every shell keystroke (tab
+	// completion), which floods the log and generates unnecessary scan lookups.
+	entryTTL := 5 * time.Minute
+	attrTTL := 5 * time.Minute
 	opts := &fs.Options{
 		EntryTimeout: &entryTTL,
 		AttrTimeout:  &attrTTL,
