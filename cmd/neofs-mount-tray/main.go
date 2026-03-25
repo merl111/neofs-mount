@@ -200,6 +200,7 @@ func main() {
 
 func openMainWindow(a fyne.App, desk desktop.App, toggleMount func()) {
 	w := a.NewWindow("neoFS Mount")
+	w.SetIcon(resourceLogoPng) // Shows up in the taskbar/dock
 	w.Resize(fyne.NewSize(720, 500))
 
 	// Content area — swapped by sidebar buttons.
