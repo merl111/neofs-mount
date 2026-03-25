@@ -676,3 +676,12 @@ func baseName(p string) string {
 	return p[i+1:]
 }
 
+// AddressFromWIF derives the Neo N3 address string from a WIF private key
+// (or a file path containing a WIF). Returns an error if parsing fails.
+func AddressFromWIF(wifOrPath string) (string, error) {
+	pk, err := parseWIFOrPath(wifOrPath)
+	if err != nil {
+		return "", err
+	}
+	return pk.PublicKey().Address(), nil
+}
