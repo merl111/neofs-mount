@@ -10,7 +10,30 @@ build:
 	go build $(LDFLAGS) -o $(BIN_DIR)/neofs-mount ./cmd/neofs-mount
 	go build $(LDFLAGS) -o $(BIN_DIR)/neofs-mount-tray ./cmd/neofs-mount-tray
 
-build-linux:
+APPIMAGETOOL := $(BIN_DIR)/appimagetool
+
+$(APPIMAGETOOL):
+	mkdir -p $(BIN_DIR)
+	curl -L -o $(APPIMAGETOOL) https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+	chmod +x $(APPIMAGETOOL)
+
+build-linux-appimage: $(APPIMAGETOOL)
+	mkdir -p $(DIST_DIR)
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build $(LDFLAGS) -o $(BIN_DIR)/neofs-mount-tray ./cmd/neofs-mount-tray
+	mkdir -p $(BIN_DIR)/AppDir/usr/bin
+	cp $(BIN_DIR)/neofs-mount-tray $(BIN_DIR)/AppDir/usr/bin/
+	echo "[Desktop Entry]" > $(BIN_DIR)/AppDir/neofs-mount-tray.desktop
+	echo "Name=neofs-mount-tray" >> $(BIN_DIR)/AppDir/neofs-mount-tray.desktop
+	echo "Exec=neofs-mount-tray" >> $(BIN_DIR)/AppDir/neofs-mount-tray.desktop
+	echo "Icon=logo-tray" >> $(BIN_DIR)/AppDir/neofs-mount-tray.desktop
+	echo "Type=Application" >> $(BIN_DIR)/AppDir/neofs-mount-tray.desktop
+	echo "Categories=Utility;" >> $(BIN_DIR)/AppDir/neofs-mount-tray.desktop
+	cp logo-tray.png $(BIN_DIR)/AppDir/logo-tray.png
+	cd $(BIN_DIR) && ./appimagetool --appimage-extract-and-run AppDir neofs-mount-tray-linux-amd64.AppImage
+	mv $(BIN_DIR)/neofs-mount-tray*.AppImage $(DIST_DIR)/neofs-mount-tray-linux-amd64.AppImage || true
+	rm -rf $(BIN_DIR)/AppDir
+
+build-linux: build-linux-appimage
 	mkdir -p $(DIST_DIR)
 	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o $(DIST_DIR)/neofs-mount-linux-amd64 ./cmd/neofs-mount
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build $(LDFLAGS) -o $(DIST_DIR)/neofs-mount-tray-linux-amd64 ./cmd/neofs-mount-tray
