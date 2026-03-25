@@ -510,6 +510,115 @@ func (c *Client) ObjectGet(ctx context.Context, containerID cid.ID, objectID oid
 	return hdr, r, nil
 }
 
+// DirEntry is a lightweight directory listing entry used by the Windows CfApi adapter.
+type DirEntry struct {
+	Name        string
+	ObjectID    string
+	Size        int64
+	IsDirectory bool
+}
+
+// ListEntriesByPrefix returns the immediate children of the given prefix within
+// a container. It is used by the Windows CfApi adapter to populate directory
+// placeholders. An empty prefix lists the top-level entries.
+func (c *Client) ListEntriesByPrefix(ctx context.Context, containerIDStr, prefix string) ([]DirEntry, error) {
+	var containerID cid.ID
+	if err := containerID.DecodeString(containerIDStr); err != nil {
+		return nil, fmt.Errorf("neofs: invalid container ID %q: %w", containerIDStr, err)
+	}
+
+	entries, _, err := c.ListEntriesByHeadScan(ctx, containerID)
+	if err != nil {
+		return nil, err
+	}
+
+	seen := map[string]struct{}{}
+	var result []DirEntry
+
+	for _, e := range entries {
+		key := e.FilePath
+		if key == "" {
+			key = e.Key
+		}
+		if key == "" {
+			key = e.Name
+		}
+		key = strings.TrimPrefix(key, "/")
+
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+
+		rest := strings.TrimPrefix(key, prefix)
+		if rest == "" {
+			continue
+		}
+
+		// Direct child vs. sub-directory.
+		if idx := strings.Index(rest, "/"); idx != -1 {
+			// It's a sub-directory entry.
+			dirName := rest[:idx]
+			if _, ok := seen[dirName]; ok {
+				continue
+			}
+			seen[dirName] = struct{}{}
+			result = append(result, DirEntry{
+				Name:        dirName,
+				IsDirectory: true,
+			})
+		} else {
+			// Direct file child.
+			name := rest
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			result = append(result, DirEntry{
+				Name:     name,
+				ObjectID: e.ObjectID.EncodeToString(),
+				Size:     e.Size,
+			})
+		}
+	}
+	return result, nil
+}
+
+// ReadObjectRange streams a byte range from a NeoFS object and returns it as a
+// slice. Used by the Windows CfApi adapter to hydrate placeholder files.
+func (c *Client) ReadObjectRange(ctx context.Context, containerIDStr, objectIDStr string, offset, length int64) ([]byte, error) {
+	var containerID cid.ID
+	if err := containerID.DecodeString(containerIDStr); err != nil {
+		return nil, fmt.Errorf("neofs: invalid container ID %q: %w", containerIDStr, err)
+	}
+	var objectID oid.ID
+	if err := objectID.DecodeString(objectIDStr); err != nil {
+		return nil, fmt.Errorf("neofs: invalid object ID %q: %w", objectIDStr, err)
+	}
+
+	var prm client.PrmObjectRange
+	r, err := c.c.ObjectRangeInit(ctx, containerID, objectID, uint64(offset), uint64(length), c.signer, prm)
+	if err != nil {
+		return nil, fmt.Errorf("neofs: ObjectRange init: %w", err)
+	}
+
+	buf := make([]byte, 0, length)
+	chunk := make([]byte, 256*1024)
+	for {
+		n, err := r.Read(chunk)
+		if n > 0 {
+			buf = append(buf, chunk[:n]...)
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("neofs: ObjectRange read: %w", err)
+		}
+	}
+	return buf, nil
+}
+
+
 func (c *Client) ObjectHead(ctx context.Context, containerID cid.ID, objectID oid.ID) (*object.Object, error) {
 	var prm client.PrmObjectHead
 	return c.c.ObjectHead(ctx, containerID, objectID, c.signer, prm)
