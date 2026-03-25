@@ -181,14 +181,16 @@ func main() {
 
 	go updateBalance(desk, balanceItem, menu)
 
-	// Auto-mount by default unless explicitly disabled.
+	// Auto-mount by default if config is valid and has required fields.
 	cfg, cfgErr := config.Load(config.DefaultConfigPath())
-	autoMount := true // default ON
-	if cfgErr == nil && cfg.AutoMount != nil {
-		autoMount = *cfg.AutoMount
-	}
-	if autoMount {
-		go toggleMount()
+	if cfgErr == nil {
+		autoMount := true
+		if cfg.AutoMount != nil {
+			autoMount = *cfg.AutoMount
+		}
+		if autoMount && cfg.Endpoint != nil && cfg.WalletKey != nil && cfg.Mountpoint != nil {
+			go toggleMount()
+		}
 	}
 
 	a.Run()
