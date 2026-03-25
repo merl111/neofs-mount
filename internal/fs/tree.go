@@ -149,12 +149,12 @@ func (n *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 			}
 		}
 		n.mu.Unlock()
-		out.SetEntryTimeout(5 * time.Minute)
+		out.SetEntryTimeout(5 * time.Second) // negative: short TTL so retries work
 		return nil, syscall.ENOENT
 	}
 found:
 	if n.isIgnored(cnr.EncodeToString()) {
-		out.SetEntryTimeout(5 * time.Minute)
+		out.SetEntryTimeout(5 * time.Second) // negative: short TTL
 		return nil, syscall.ENOENT
 	}
 
@@ -398,7 +398,9 @@ func (n *containerNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 		n.log.Debug("lookup miss", "container", n.cnr.EncodeToString(), "name", name, "entries", len(entries))
 	}
 	// Cache the negative lookup too, so the kernel doesn't spam us with `.git` misses on every shell keypress.
-	out.SetEntryTimeout(5 * time.Minute)
+	// Short TTL for negative entries — long TTL would cause the kernel to cache
+	// "not found" for minutes, making newly uploaded files invisible.
+	out.SetEntryTimeout(5 * time.Second)
 	return nil, syscall.ENOENT
 }
 
