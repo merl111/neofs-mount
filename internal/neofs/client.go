@@ -109,7 +109,9 @@ func New(ctx context.Context, p Params) (*Client, error) {
 	prmDial.SetServerURI(p.Endpoint)
 	prmDial.SetContext(ctx)
 	prmDial.SetTimeout(15 * time.Second)
-	// No stream timeout: upload streams for large objects must not be killed mid-transfer.
+	// Use a very large stream timeout. Removing the call entirely reverts to the SDK's
+	// ~60s default which silently kills large-file uploads mid-transfer.
+	prmDial.SetStreamTimeout(72 * time.Hour)
 	if err := c.Dial(prmDial); err != nil {
 		return nil, fmt.Errorf("neofs: dial: %w", err)
 	}
