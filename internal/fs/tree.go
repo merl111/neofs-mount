@@ -149,12 +149,12 @@ func (n *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 			}
 		}
 		n.mu.Unlock()
-		out.SetEntryTimeout(5 * time.Second)
+		out.SetEntryTimeout(5 * time.Minute)
 		return nil, syscall.ENOENT
 	}
 found:
 	if n.isIgnored(cnr.EncodeToString()) {
-		out.SetEntryTimeout(5 * time.Second)
+		out.SetEntryTimeout(5 * time.Minute)
 		return nil, syscall.ENOENT
 	}
 
@@ -175,8 +175,8 @@ found:
 	}
 	out.Attr.Uid = uint32(os.Getuid())
 	out.Attr.Gid = uint32(os.Getgid())
-	out.SetEntryTimeout(5 * time.Second)
-	out.SetAttrTimeout(5 * time.Second)
+	out.SetEntryTimeout(5 * time.Minute)
+	out.SetAttrTimeout(5 * time.Minute)
 
 	st := fs.StableAttr{Mode: fuse.S_IFDIR}
 	return n.NewInode(ctx, child, st), 0
@@ -329,8 +329,8 @@ func (n *containerNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 		}
 		out.Attr.Uid = uint32(os.Getuid())
 		out.Attr.Gid = uint32(os.Getgid())
-		out.SetEntryTimeout(5 * time.Second)
-		out.SetAttrTimeout(5 * time.Second)
+		out.SetEntryTimeout(5 * time.Minute)
+		out.SetAttrTimeout(5 * time.Minute)
 		st := fs.StableAttr{Mode: fuse.S_IFDIR}
 		return n.NewInode(ctx, child, st), 0
 	}
@@ -376,8 +376,8 @@ func (n *containerNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 		if !fileTime.IsZero() {
 			out.Attr.SetTimes(nil, &fileTime, &fileTime)
 		}
-		out.SetEntryTimeout(5 * time.Second)
-		out.SetAttrTimeout(5 * time.Second)
+		out.SetEntryTimeout(5 * time.Minute)
+		out.SetAttrTimeout(5 * time.Minute)
 
 		child := &fileNode{
 			log:      n.log,
@@ -398,7 +398,7 @@ func (n *containerNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 		n.log.Debug("lookup miss", "container", n.cnr.EncodeToString(), "name", name, "entries", len(entries))
 	}
 	// Cache the negative lookup too, so the kernel doesn't spam us with `.git` misses on every shell keypress.
-	out.SetEntryTimeout(5 * time.Second)
+	out.SetEntryTimeout(5 * time.Minute)
 	return nil, syscall.ENOENT
 }
 
@@ -603,8 +603,8 @@ func (n *containerNode) Mkdir(ctx context.Context, name string, mode uint32, out
 	}
 	out.Attr.Uid = uint32(os.Getuid())
 	out.Attr.Gid = uint32(os.Getgid())
-	out.SetEntryTimeout(5 * time.Second)
-	out.SetAttrTimeout(5 * time.Second)
+	out.SetEntryTimeout(5 * time.Minute)
+	out.SetAttrTimeout(5 * time.Minute)
 
 	st := fs.StableAttr{Mode: fuse.S_IFDIR}
 	return n.NewInode(ctx, child, st), 0
