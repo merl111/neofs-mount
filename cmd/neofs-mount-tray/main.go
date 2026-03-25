@@ -56,8 +56,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error: Tray menu is not supported on this platform")
 		os.Exit(1)
 	}
-
 	a.SetIcon(resourceLogoPng)
+	a.Settings().SetTheme(&modernTheme{})
 
 	var menu *fyne.Menu
 	var mountItem *fyne.MenuItem
@@ -242,26 +242,38 @@ func openMainWindow(a fyne.App, desk desktop.App, toggleMount func()) {
 			b.Refresh()
 		}
 	}
-
 	sidebar := container.NewVBox()
+
+	// Logo Header
+	logoImg := canvas.NewImageFromResource(resourceLogoPng)
+	logoImg.FillMode = canvas.ImageFillContain
+	logoImg.SetMinSize(fyne.NewSize(64, 64))
+	titleLabel := widget.NewLabelWithStyle("neoFS Mount", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	header := container.NewVBox(
+		container.NewPadded(logoImg),
+		titleLabel,
+		widget.NewSeparator(),
+	)
+	sidebar.Add(header)
+
 	for i, item := range navItems {
 		i, item := i, item
 		btn := widget.NewButtonWithIcon(item.label, item.icon, func() { selectNav(i) })
 		btn.Alignment = widget.ButtonAlignLeading
+		btn.Importance = widget.LowImportance
 		btn.Importance = widget.MediumImportance
 		navBtns = append(navBtns, btn)
 		sidebar.Add(btn)
 	}
 	selectNav(0)
+	sidebarScroll := container.NewVScroll(container.NewPadded(sidebar))
+	sidebarScroll.SetMinSize(fyne.NewSize(180, 0))
 
-	sidebarScroll := container.NewVScroll(sidebar)
-	sidebarScroll.SetMinSize(fyne.NewSize(140, 0))
-
-	sep := canvas.NewRectangle(theme.ShadowColor())
+	sep := canvas.NewRectangle(theme.SeparatorColor())
 	sep.SetMinSize(fyne.NewSize(1, 0))
 
 	split := container.NewBorder(nil, nil,
-		container.NewBorder(nil, nil, nil, sep, sidebarScroll),
+		container.NewHBox(sidebarScroll, sep),
 		nil,
 		container.NewPadded(contentArea),
 	)
@@ -290,11 +302,11 @@ var dash dashWidgets
 
 func buildDashPage(a fyne.App, toggleMount func()) fyne.CanvasObject {
 	dash.mountStatus = widget.NewLabelWithStyle("●  Unmounted", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	dash.gasBalance = widget.NewLabel("…")
-	dash.n3Addr = widget.NewLabel("…")
-	dash.mountpoint = widget.NewLabel("…")
+	dash.gasBalance = widget.NewLabelWithStyle("…", fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
+	dash.n3Addr = widget.NewLabelWithStyle("…", fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
+	dash.mountpoint = widget.NewLabelWithStyle("…", fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
 
-	dash.mountBtn = widget.NewButton("Mount", func() {
+	dash.mountBtn = widget.NewButtonWithIcon("Mount File System", theme.MediaPlayIcon(), func() {
 		go toggleMount()
 	})
 	dash.mountBtn.Importance = widget.HighImportance
@@ -307,9 +319,10 @@ func buildDashPage(a fyne.App, toggleMount func()) fyne.CanvasObject {
 	)
 
 	return container.NewVBox(
-		widget.NewLabelWithStyle("Dashboard", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: false}),
+		widget.NewLabelWithStyle("Dashboard Overview", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		widget.NewSeparator(),
-		form,
+		layout.NewSpacer(),
+		container.NewHBox(layout.NewSpacer(), form, layout.NewSpacer()),
 		layout.NewSpacer(),
 		dash.mountBtn,
 	)
@@ -325,13 +338,19 @@ func dashRefreshLoop(page fyne.CanvasObject, w fyne.Window) {
 			// Mount status
 			if activeMount != nil {
 				dash.mountStatus.Text = "●  Mounted"
-				dash.mountBtn.SetText("Unmount")
+				dash.mountStatus.Importance = widget.HighImportance // Use accent color conceptually
+				dash.mountBtn.SetText("Unmount File System")
+				dash.mountBtn.SetIcon(theme.MediaStopIcon())
+				dash.mountBtn.Importance = widget.DangerImportance
 				if err == nil && cfg.Mountpoint != nil {
 					dash.mountpoint.SetText(*cfg.Mountpoint)
 				}
 			} else {
 				dash.mountStatus.Text = "○  Unmounted"
-				dash.mountBtn.SetText("Mount")
+				dash.mountStatus.Importance = widget.MediumImportance
+				dash.mountBtn.SetText("Mount File System")
+				dash.mountBtn.SetIcon(theme.MediaPlayIcon())
+				dash.mountBtn.Importance = widget.HighImportance
 				dash.mountpoint.SetText("—")
 			}
 
