@@ -985,6 +985,19 @@ func (n *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	if n.obj.IsZero() {
 		return nil, 0, syscall.ENOENT
 	}
+
+	// Large-file fast path: stream directly from NeoFS without downloading the
+	// entire object first. This keeps Open() non-blocking for multi-GB files so
+	// the file explorer doesn't hang while waiting for a full download.
+	const streamThreshold = 64 << 20 // 64 MB
+	if n.fileSize >= streamThreshold {
+		_, r, err := n.neo.ObjectGet(ctx, n.cnr, n.obj)
+		if err != nil {
+			return nil, 0, errno(err)
+		}
+		return &streamingFileHandle{r: r, size: int64(n.fileSize)}, fuse.FOPEN_DIRECT_IO, 0
+	}
+
 	key := cache.Key(n.cnr.EncodeToString(), n.obj.EncodeToString())
 	path, size, err := n.cache.GetOrFetch(ctx, key, func(ctx context.Context, w io.Writer) error {
 		_, r, err := n.neo.ObjectGet(ctx, n.cnr, n.obj)
@@ -1030,6 +1043,62 @@ func (h *cachedFileHandle) Release(ctx context.Context) syscall.Errno {
 	}
 	return 0
 }
+
+// streamingFileHandle serves large-object reads directly from a NeoFS gRPC
+// stream without buffering the entire file. FOPEN_DIRECT_IO is set on open
+// so the kernel won't try random-access pread semantics.
+//
+// FUSE with DIRECT_IO issues sequential Read calls with incrementing offsets,
+// so we only need to track the current position and discard skipped bytes.
+type streamingFileHandle struct {
+	mu   sync.Mutex
+	r    io.ReadCloser
+	pos  int64 // bytes consumed from r so far
+	size int64
+}
+
+var _ = (fs.FileHandle)((*streamingFileHandle)(nil))
+var _ = (fs.FileReader)((*streamingFileHandle)(nil))
+var _ = (fs.FileReleaser)((*streamingFileHandle)(nil))
+
+func (h *streamingFileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.r == nil {
+		return fuse.ReadResultData(nil), 0
+	}
+
+	// Discard bytes if the kernel skipped forward.
+	if off > h.pos {
+		if _, err := io.CopyN(io.Discard, h.r, off-h.pos); err != nil && !errors.Is(err, io.EOF) {
+			return nil, syscall.EIO
+		}
+		h.pos = off
+	}
+	if off < h.pos {
+		// Backward seek not supported on a stream — signal EOF.
+		return fuse.ReadResultData(nil), 0
+	}
+
+	n, err := io.ReadFull(h.r, dest)
+	h.pos += int64(n)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, syscall.EIO
+	}
+	return fuse.ReadResultData(dest[:n]), 0
+}
+
+func (h *streamingFileHandle) Release(ctx context.Context) syscall.Errno {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.r != nil {
+		_ = h.r.Close()
+		h.r = nil
+	}
+	return 0
+}
+
 
 type uploadFileHandle struct {
 	log          *slog.Logger
