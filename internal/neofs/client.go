@@ -109,7 +109,7 @@ func New(ctx context.Context, p Params) (*Client, error) {
 	prmDial.SetServerURI(p.Endpoint)
 	prmDial.SetContext(ctx)
 	prmDial.SetTimeout(15 * time.Second)
-	prmDial.SetStreamTimeout(30 * time.Second)
+	// No stream timeout: upload streams for large objects must not be killed mid-transfer.
 	if err := c.Dial(prmDial); err != nil {
 		return nil, fmt.Errorf("neofs: dial: %w", err)
 	}
@@ -165,7 +165,9 @@ type SearchEntry struct {
 
 
 
-const headScanCacheTTL = 30 * time.Second
+// headScanCacheTTL mirrors how S3 FUSE tools like goofys handle immutable stores:
+// objects never change once written, so a long TTL only means slightly stale listings.
+const headScanCacheTTL = 5 * time.Minute
 
 const headScanWorkers = 12
 

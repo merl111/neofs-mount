@@ -22,12 +22,14 @@ import (
 	"github.com/mathias/neofs-mount/internal/fs"
 	"github.com/mathias/neofs-mount/internal/mountutils"
 	"github.com/mathias/neofs-mount/internal/neofs"
+	"github.com/mathias/neofs-mount/internal/uploads"
 )
 
 var (
-	activeMount  *fs.MountedFS
-	mountContext context.Context
-	mountCancel  context.CancelFunc
+	activeMount   *fs.MountedFS
+	mountContext  context.Context
+	mountCancel   context.CancelFunc
+	uploadTracker = uploads.New()
 )
 
 func main() {
@@ -100,6 +102,7 @@ func main() {
 				CacheDir:           cacheDir,
 				CacheSize:          cacheSize,
 				IgnoreContainerIDs: cfg.IgnoreContainerIDs,
+				UploadTracker:      uploadTracker,
 			})
 			if mntErr != nil {
 				notifyError(a, mntErr)
@@ -156,7 +159,22 @@ func main() {
 	balanceItem = fyne.NewMenuItem("Balance: ...", nil)
 	balanceItem.Disabled = true
 
-	menu = fyne.NewMenu("neoFS-mount", balanceItem, fyne.NewMenuItemSeparator(), mountItem, fyne.NewMenuItemSeparator(), topUpItem, fyne.NewMenuItemSeparator(), settingsItem, fyne.NewMenuItemSeparator(), quitItem)
+	uploadsItem := fyne.NewMenuItem("Uploads…", func() {
+		openUploadsWindow(a)
+	})
+
+	menu = fyne.NewMenu("neoFS-mount",
+		balanceItem,
+		fyne.NewMenuItemSeparator(),
+		mountItem,
+		fyne.NewMenuItemSeparator(),
+		uploadsItem,
+		topUpItem,
+		fyne.NewMenuItemSeparator(),
+		settingsItem,
+		fyne.NewMenuItemSeparator(),
+		quitItem,
+	)
 	desk.SetSystemTrayMenu(menu)
 
 	go updateBalance(desk, balanceItem, menu)
@@ -174,6 +192,78 @@ func notifyError(a fyne.App, err error) {
 	w := a.NewWindow("neoFS-mount Error")
 	dialog.ShowError(err, w)
 	w.Show()
+}
+
+func openUploadsWindow(a fyne.App) {
+	w := a.NewWindow("Active Uploads")
+	w.Resize(fyne.NewSize(520, 300))
+
+	emptyLabel := widget.NewLabel("No active uploads.")
+	emptyLabel.Alignment = fyne.TextAlignCenter
+
+	content := container.NewVBox()
+
+	formatBytes := func(b int64) string {
+		switch {
+		case b >= 1<<30:
+			return fmt.Sprintf("%.2f GB", float64(b)/float64(1<<30))
+		case b >= 1<<20:
+			return fmt.Sprintf("%.2f MB", float64(b)/float64(1<<20))
+		case b >= 1<<10:
+			return fmt.Sprintf("%.2f KB", float64(b)/float64(1<<10))
+		default:
+			return fmt.Sprintf("%d B", b)
+		}
+	}
+
+	refresh := func() {
+		fyne.Do(func() {
+			content.Objects = nil
+			entries := uploadTracker.List()
+			if len(entries) == 0 {
+				content.Add(emptyLabel)
+			} else {
+				for _, e := range entries {
+					e := e
+					name := filepath.Base(e.Path)
+					sent := e.Sent()
+					total := e.TotalBytes
+					elapsed := time.Since(e.Started).Round(time.Second)
+
+					pct := float64(0)
+					if total > 0 {
+						pct = float64(sent) / float64(total)
+					}
+
+					bar := widget.NewProgressBar()
+					bar.SetValue(pct)
+
+					label := widget.NewLabel(fmt.Sprintf("%s  •  %s / %s  •  %s elapsed",
+						name, formatBytes(sent), formatBytes(total), elapsed))
+					label.TextStyle = fyne.TextStyle{Monospace: true}
+
+					content.Add(container.NewVBox(label, bar))
+				}
+			}
+			content.Refresh()
+		})
+	}
+
+	refresh()
+	w.SetContent(container.NewPadded(content))
+	w.Show()
+
+	// Refresh every 2 seconds while the window is visible.
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if w == nil {
+				return
+			}
+			refresh()
+		}
+	}()
 }
 
 func openSettingsWindow(a fyne.App, desk desktop.App, balanceItem *fyne.MenuItem, menu *fyne.Menu) {

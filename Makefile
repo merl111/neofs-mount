@@ -22,6 +22,7 @@ build-linux-appimage: $(APPIMAGETOOL)
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build $(LDFLAGS) -o $(BIN_DIR)/neofs-mount-tray ./cmd/neofs-mount-tray
 	mkdir -p $(BIN_DIR)/AppDir/usr/bin
 	cp $(BIN_DIR)/neofs-mount-tray $(BIN_DIR)/AppDir/usr/bin/
+	ln -s usr/bin/neofs-mount-tray $(BIN_DIR)/AppDir/AppRun
 	echo "[Desktop Entry]" > $(BIN_DIR)/AppDir/neofs-mount-tray.desktop
 	echo "Name=neofs-mount-tray" >> $(BIN_DIR)/AppDir/neofs-mount-tray.desktop
 	echo "Exec=neofs-mount-tray" >> $(BIN_DIR)/AppDir/neofs-mount-tray.desktop

@@ -3,6 +3,7 @@ package fs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"strings"
 	"syscall"
 	"time"
@@ -22,27 +24,29 @@ import (
 
 	"github.com/mathias/neofs-mount/internal/cache"
 	"github.com/mathias/neofs-mount/internal/neofs"
+	"github.com/mathias/neofs-mount/internal/uploads"
 )
 
 type rootNode struct {
 	fs.Inode
 
-	log   *slog.Logger
-	neo   *neofs.Client
-	cache *cache.Cache
-	dirCache *dirCache
-	ro    bool
-	epoch uint64
+	log          *slog.Logger
+	neo          *neofs.Client
+	cache        *cache.Cache
+	dirCache     *dirCache
+	ro           bool
+	epoch        uint64
+	uploadTracker *uploads.Tracker
 
 	mu            sync.Mutex
-	containerByUI map[string]cid.ID // directory name -> container id
+	containerByUI map[string]cid.ID
 
 	entriesMu      sync.Mutex
 	rootEntries    []fuse.DirEntry
 	rootEntriesAt  time.Time
 	rootEntriesTTL time.Duration
 
-	ignoreContainers map[string]struct{} // containerID string -> {}
+	ignoreContainers map[string]struct{}
 }
 
 func (n *rootNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -155,13 +159,14 @@ found:
 	}
 
 	child := &containerNode{
-		log:  n.log,
-		neo:  n.neo,
-		cache: n.cache,
-		dirCache: n.dirCache,
-		ro:   n.ro,
-		cnr:  cnr,
-		path: "", // relative path inside container
+		log:           n.log,
+		neo:           n.neo,
+		cache:         n.cache,
+		dirCache:      n.dirCache,
+		ro:            n.ro,
+		cnr:           cnr,
+		path:          "",
+		uploadTracker: n.uploadTracker,
 	}
 	
 	out.Attr.Mode = fuse.S_IFDIR | 0o555
@@ -217,13 +222,14 @@ func makeIgnoreSet(ids []string) map[string]struct{} {
 type containerNode struct {
 	fs.Inode
 
-	log  *slog.Logger
-	neo  *neofs.Client
-	cache *cache.Cache
-	dirCache *dirCache
-	ro   bool
-	cnr  cid.ID
-	path string // relative path inside container, no leading '/', no trailing '/'
+	log          *slog.Logger
+	neo          *neofs.Client
+	cache        *cache.Cache
+	dirCache     *dirCache
+	ro           bool
+	cnr          cid.ID
+	path         string
+	uploadTracker *uploads.Tracker
 }
 
 func (n *containerNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
@@ -498,15 +504,16 @@ func (n *containerNode) Create(ctx context.Context, name string, flags uint32, m
 	in := n.NewInode(ctx, fn, st)
 
 	h := &uploadFileHandle{
-		log:      n.log,
-		neo:      n.neo,
-		cache:    n.cache,
-		dirCache: n.dirCache,
-		node:     fn,
-		tmpPath:  f.Name(),
-		f:        f,
-		cnr:      n.cnr,
-		relPath:  relPath,
+		log:           n.log,
+		neo:           n.neo,
+		cache:         n.cache,
+		dirCache:      n.dirCache,
+		uploadTracker: n.uploadTracker,
+		node:          fn,
+		tmpPath:       f.Name(),
+		f:             f,
+		cnr:           n.cnr,
+		relPath:       relPath,
 	}
 
 	if n.dirCache != nil {
@@ -867,7 +874,9 @@ func (n *fileNode) getAttrs(ctx context.Context) (map[string]string, error) {
 	n.attrMu.Lock()
 	ttl := n.attrTTL
 	if ttl == 0 {
-		ttl = 5 * time.Second
+		// Objects in NeoFS are immutable once written — their attributes never change.
+		// Cache aggressively like goofys does for S3 objects.
+		ttl = 5 * time.Minute
 	}
 	// If we already fetched recently, serve from cache (including cached errors).
 	if n.attrs != nil && !n.attrFetched.IsZero() && time.Since(n.attrFetched) < ttl {
@@ -1007,11 +1016,12 @@ func (h *cachedFileHandle) Release(ctx context.Context) syscall.Errno {
 }
 
 type uploadFileHandle struct {
-	log      *slog.Logger
-	neo      *neofs.Client
-	cache    *cache.Cache
-	dirCache *dirCache
-	node     *fileNode
+	log          *slog.Logger
+	neo          *neofs.Client
+	cache        *cache.Cache
+	dirCache     *dirCache
+	uploadTracker *uploads.Tracker
+	node         *fileNode
 
 	tmpPath string
 	f       *os.File
@@ -1023,6 +1033,26 @@ type uploadFileHandle struct {
 var _ = (fs.FileHandle)((*uploadFileHandle)(nil))
 var _ = (fs.FileWriter)((*uploadFileHandle)(nil))
 var _ = (fs.FileReleaser)((*uploadFileHandle)(nil))
+
+// progressReader wraps an io.Reader, counting bytes read and updating the upload tracker entry.
+type progressReader struct {
+	r     io.Reader
+	entry *uploads.Entry
+	sent  atomic.Int64
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n > 0 {
+		p.sent.Add(int64(n))
+		if p.entry != nil {
+			p.entry.AddSent(int64(n))
+		}
+	}
+	return n, err
+}
+
+func (p *progressReader) Sent() int64 { return p.sent.Load() }
 
 func (h *uploadFileHandle) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
 	if h.f == nil {
@@ -1043,7 +1073,7 @@ func (h *uploadFileHandle) Release(ctx context.Context) syscall.Errno {
 	h.f = nil
 
 	// Capture values for the background goroutine
-	ctxBg := context.Background() // Use an independent context so it survives the FUSE call.
+	ctxBg := context.Background()
 	cnr := h.cnr
 	relPath := h.relPath
 	tmpPath := h.tmpPath
@@ -1051,11 +1081,28 @@ func (h *uploadFileHandle) Release(ctx context.Context) syscall.Errno {
 	cacheStore := h.cache
 	node := h.node
 	dirCache := h.dirCache
+	uploadTracker := h.uploadTracker
 
 	go func() {
-		defer os.Remove(tmpPath) // Ensures cleanup regardless of success/flow
+		start := time.Now()
+		fi, statErr := os.Stat(tmpPath)
+		fileBytes := int64(0)
+		if statErr == nil {
+			fileBytes = fi.Size()
+		}
+		if h.log != nil {
+			h.log.Info("[upload] starting", "path", relPath, "bytes", fileBytes)
+		}
 
-		// Best-effort overwrite semantics: delete previous objects at the same FilePath.
+		// Register with tracker (if available).
+		var trackerEntry *uploads.Entry
+		if uploadTracker != nil {
+			trackerEntry = uploadTracker.Register(relPath, fileBytes)
+			defer uploadTracker.Finish(relPath)
+		}
+
+		defer os.Remove(tmpPath)
+
 		parent := &containerNode{neo: neo, cnr: cnr}
 		var oldIDs []oid.ID
 		if ids, err := parent.findObjectsByExactPath(ctxBg, relPath); err == nil {
@@ -1065,27 +1112,53 @@ func (h *uploadFileHandle) Release(ctx context.Context) syscall.Errno {
 		src, err := os.Open(tmpPath)
 		if err != nil {
 			if h.log != nil {
-				h.log.Error("bg upload: failed to open temp file", "err", err, "path", tmpPath)
+				h.log.Error("[upload] FAILED", "path", relPath, "err", err, "elapsed", time.Since(start).Round(time.Millisecond))
 			}
 			return
 		}
 
-		newID, putErr := neo.ObjectPut(ctxBg, cnr, relPath, src, "")
+		// Wrap with progress reader so the tracker and log ticker get byte counts.
+		pr := &progressReader{r: src, entry: trackerEntry}
+
+		// Log progress every 10 seconds.
+		if h.log != nil && fileBytes > 0 {
+			ticker := time.NewTicker(10 * time.Second)
+			done := make(chan struct{})
+			defer close(done)
+			go func() {
+				for {
+					select {
+					case <-ticker.C:
+						sent := pr.Sent()
+						pct := int(float64(sent) / float64(fileBytes) * 100)
+						h.log.Info("[upload] progress",
+							"path", relPath,
+							"sent", fmt.Sprintf("%d/%d", sent, fileBytes),
+							"pct", fmt.Sprintf("%d%%", pct),
+							"elapsed", time.Since(start).Round(time.Second),
+						)
+					case <-done:
+						ticker.Stop()
+						return
+					}
+				}
+			}()
+		}
+
+		newID, putErr := neo.ObjectPut(ctxBg, cnr, relPath, pr, "")
 		_ = src.Close()
 
 		if putErr != nil {
 			if h.log != nil {
-				h.log.Error("bg upload: failed to upload object", "err", putErr, "path", relPath)
+				h.log.Error("[upload] FAILED", "path", relPath, "bytes", fileBytes, "err", putErr, "elapsed", time.Since(start).Round(time.Millisecond))
 			}
 			return
 		}
 
-		// Success: delete the old files.
 		for _, id := range oldIDs {
 			_ = neo.ObjectDelete(ctxBg, cnr, id)
 		}
 
-		// Add to cache
 		key := cache.Key(cnr.EncodeToString(), newID.EncodeToString())
 		if _, size, err := cacheStore.StoreFromPath(key, tmpPath); err == nil {
 			node.obj = newID
@@ -1094,14 +1167,13 @@ func (h *uploadFileHandle) Release(ctx context.Context) syscall.Errno {
 			node.obj = newID
 		}
 
-		// Invalidate caches so readdir/lookup see the new object.
 		neo.InvalidateContainerScan(cnr)
 		if dirCache != nil {
 			dirCache.InvalidateContainer(cnr.EncodeToString())
 		}
-		
+
 		if h.log != nil {
-			h.log.Info("bg upload successful", "obj", newID.EncodeToString(), "path", relPath)
+			h.log.Info("[upload] ok", "path", relPath, "obj", newID.EncodeToString(), "bytes", fileBytes, "elapsed", time.Since(start).Round(time.Millisecond))
 		}
 	}()
 
