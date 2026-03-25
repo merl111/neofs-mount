@@ -1,0 +1,26 @@
+# NeoFS mount config for neofs-mount
+#
+# Copy this file to your default config location:
+#   Linux:  $XDG_CONFIG_HOME/neofs-mount/config.toml
+#   macOS:  $HOME/Library/Application Support/neofs-mount/config.toml
+#
+# Then edit the values below. CLI flags override config file values.
+
+endpoint = "s03.neofs.devenv:8080"
+# Either a path to a file containing WIF, or a raw WIF string directly:
+wallet_key = "/path/to/wallet.key"
+mountpoint = "/tmp/neofs"
+
+# If true, mounts the filesystem as read-only.
+read_only = false
+
+# Optional cache settings (used for reads and to stage writes before upload).
+cache_dir = "/tmp/neofs-cache"
+cache_size = 1073741824 # 1GiB
+
+# Log level: debug|info|warn|error
+log_level = "info"
+
+# Optional: hide containers from the mount root by container ID
+ignore_container_ids = []
+
