@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -513,79 +514,78 @@ func buildSettingsPage(a fyne.App, w fyne.Window, desk desktop.App) fyne.CanvasO
 		logLevelSelect.SetSelected("info")
 	}
 
-	form := &widget.Form{
-		Items: []*widget.FormItem{
-			{Text: "Network", Widget: networkSelect},
-			{Text: "Endpoint", Widget: endpointEntry, HintText: "e.g. s03.neofs.devenv:8080"},
-			{Text: "Wallet Key", Widget: walletKeyEntry, HintText: "WIF string or path to .key file"},
-			{Text: "Override RPC", Widget: rpcEntry, HintText: "Leave blank for defaults"},
-			{Text: "Mountpoint", Widget: mountpointEntry, HintText: "Directory to mount NeoFS on"},
-			{Text: "Cache Dir", Widget: cacheDirEntry, HintText: "Local path for temporary uploads"},
-			{Text: "Cache Size", Widget: cacheSizeEntry, HintText: "Max cache size in bytes"},
-			{Text: "Log Level", Widget: logLevelSelect},
-			{Text: "Read Only", Widget: readOnlyCheck},
-			{Text: "Auto Mount", Widget: autoMountCheck},
-			{Text: "Run at Login", Widget: runAtLoginCheck},
-		},
-		OnSubmit: func() {
-			ep := endpointEntry.Text
-			if ep != "" {
-				cfg.Endpoint = &ep
-			} else {
-				cfg.Endpoint = nil
-			}
-			wk := walletKeyEntry.Text
-			if wk != "" {
-				cfg.WalletKey = &wk
-			} else {
-				cfg.WalletKey = nil
-			}
-			mp := mountpointEntry.Text
-			if mp != "" {
-				cfg.Mountpoint = &mp
-			} else {
-				cfg.Mountpoint = nil
-			}
-			cd := cacheDirEntry.Text
-			if cd != "" {
-				cfg.CacheDir = &cd
-			} else {
-				cfg.CacheDir = nil
-			}
-			sz, _ := strconv.ParseInt(cacheSizeEntry.Text, 10, 64)
-			if sz > 0 {
-				cfg.CacheSize = &sz
-			} else {
-				cfg.CacheSize = nil
-			}
-			ll := logLevelSelect.Selected
-			cfg.LogLevel = &ll
-			ro := readOnlyCheck.Checked
-			cfg.ReadOnly = &ro
-			am := autoMountCheck.Checked
-			cfg.AutoMount = &am
-			ral := runAtLoginCheck.Checked
-			cfg.RunAtLogin = &ral
-			nw := networkSelect.Selected
-			cfg.Network = &nw
-			rpcE := rpcEntry.Text
-			if rpcE != "" {
-				cfg.RPCEndpoint = &rpcE
-			} else {
-				cfg.RPCEndpoint = nil
-			}
+	form := widget.NewForm(
+		&widget.FormItem{Text: "Network", Widget: networkSelect},
+		&widget.FormItem{Text: "Endpoint", Widget: endpointEntry, HintText: "e.g. s03.neofs.devenv:8080"},
+		&widget.FormItem{Text: "Wallet Key", Widget: walletKeyEntry, HintText: "WIF string or path to .key file"},
+		&widget.FormItem{Text: "Override RPC", Widget: rpcEntry, HintText: "Leave blank for defaults"},
+		&widget.FormItem{Text: "Mountpoint", Widget: mountpointEntry, HintText: "Directory to mount NeoFS on"},
+		&widget.FormItem{Text: "Cache Dir", Widget: cacheDirEntry, HintText: "Local path for temporary uploads"},
+		&widget.FormItem{Text: "Cache Size", Widget: cacheSizeEntry, HintText: "Max cache size in bytes"},
+		&widget.FormItem{Text: "Log Level", Widget: logLevelSelect},
+		&widget.FormItem{Text: "Read Only", Widget: readOnlyCheck},
+		&widget.FormItem{Text: "Auto Mount", Widget: autoMountCheck},
+		&widget.FormItem{Text: "Run at Login", Widget: runAtLoginCheck},
+	)
 
-			if err := toggleRunAtLogin(ral); err != nil {
-				dialog.ShowError(fmt.Errorf("Failed to configure OS startup: %w", err), w)
-			}
-			if err := config.Save(cfgPath, cfg); err != nil {
-				dialog.ShowError(err, w)
-			} else {
-				dialog.ShowInformation("Saved", "Configuration saved.", w)
-			}
-		},
-		SubmitText: "Save",
-	}
+	saveBtn := widget.NewButtonWithIcon("Save Settings", theme.DocumentSaveIcon(), func() {
+		ep := endpointEntry.Text
+		if ep != "" {
+			cfg.Endpoint = &ep
+		} else {
+			cfg.Endpoint = nil
+		}
+		wk := walletKeyEntry.Text
+		if wk != "" {
+			cfg.WalletKey = &wk
+		} else {
+			cfg.WalletKey = nil
+		}
+		mp := mountpointEntry.Text
+		if mp != "" {
+			cfg.Mountpoint = &mp
+		} else {
+			cfg.Mountpoint = nil
+		}
+		cd := cacheDirEntry.Text
+		if cd != "" {
+			cfg.CacheDir = &cd
+		} else {
+			cfg.CacheDir = nil
+		}
+		sz, _ := strconv.ParseInt(cacheSizeEntry.Text, 10, 64)
+		if sz > 0 {
+			cfg.CacheSize = &sz
+		} else {
+			cfg.CacheSize = nil
+		}
+		ll := logLevelSelect.Selected
+		cfg.LogLevel = &ll
+		ro := readOnlyCheck.Checked
+		cfg.ReadOnly = &ro
+		am := autoMountCheck.Checked
+		cfg.AutoMount = &am
+		ral := runAtLoginCheck.Checked
+		cfg.RunAtLogin = &ral
+		nw := networkSelect.Selected
+		cfg.Network = &nw
+		rpcE := rpcEntry.Text
+		if rpcE != "" {
+			cfg.RPCEndpoint = &rpcE
+		} else {
+			cfg.RPCEndpoint = nil
+		}
+
+		if err := toggleRunAtLogin(ral); err != nil {
+			dialog.ShowError(fmt.Errorf("Failed to configure OS startup: %w", err), w)
+		}
+		if err := config.Save(cfgPath, cfg); err != nil {
+			dialog.ShowError(err, w)
+		} else {
+			dialog.ShowInformation("Saved", "Configuration saved.", w)
+		}
+	})
+	saveBtn.Importance = widget.HighImportance
 
 	openLogsBtn := widget.NewButtonWithIcon("Open Logs Directory", theme.FolderIcon(), func() {
 		if err := mountutils.OpenLogDirectory(); err != nil {
@@ -597,6 +597,7 @@ func buildSettingsPage(a fyne.App, w fyne.Window, desk desktop.App) fyne.CanvasO
 		widget.NewLabelWithStyle("Settings", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		widget.NewSeparator(),
 		form,
+		container.NewPadded(saveBtn),
 		widget.NewSeparator(),
 		container.NewHBox(openLogsBtn),
 	))
@@ -794,6 +795,14 @@ X-GNOME-Autostart-enabled=true
 		}
 		_ = os.Remove(plistFile)
 		return nil
+	} else if runtime.GOOS == "windows" {
+		if enable {
+			cmd := exec.Command("reg", "add", `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "/v", "neofs-mount-tray", "/t", "REG_SZ", "/d", exe, "/f")
+			return cmd.Run()
+		} else {
+			cmd := exec.Command("reg", "delete", `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "/v", "neofs-mount-tray", "/f")
+			return cmd.Run()
+		}
 	}
 	return nil
 }
