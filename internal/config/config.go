@@ -57,6 +57,11 @@ func Load(path string) (*FileConfig, error) {
 	if err := toml.Unmarshal(b, &fc); err != nil {
 		return nil, err
 	}
+	// Default AutoMount to true if not present.
+	if fc.AutoMount == nil {
+		t := true
+		fc.AutoMount = &t
+	}
 	return &fc, nil
 }
 
