@@ -462,7 +462,7 @@ func buildSettingsPage(a fyne.App, w fyne.Window, desk desktop.App) fyne.CanvasO
 	endpointEntry := widget.NewEntry()
 	endpointEntry.SetText(strVal(cfg.Endpoint))
 
-	walletKeyEntry := widget.NewEntry()
+	walletKeyEntry := widget.NewPasswordEntry()
 	walletKeyEntry.SetText(strVal(cfg.WalletKey))
 
 	mountpointEntry := widget.NewEntry()
