@@ -8,7 +8,16 @@ on:
 jobs:
   release:
     name: Build & Release
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+            make_cmd: make build-linux
+          - os: macos-latest
+            target: darwin
+            make_cmd: make build-darwin
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -16,15 +25,35 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '>=1.22.0'
+          go-version: '>=1.24.0'
 
-      - name: Install Native Fyne Dependencies
+      - name: Install Native Fyne Dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev
 
-      - name: Build All Architectures
-        run: make build-all
+      - name: Build Architectures
+        run: ${{ matrix.make_cmd }}
+
+      - name: Upload Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}
+          path: dist/*
+          retention-days: 1
+
+  publish:
+    name: Publish Release
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: binaries-*
+          merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
