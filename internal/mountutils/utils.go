@@ -3,9 +3,11 @@ package mountutils
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"syscall"
 )
@@ -25,8 +27,43 @@ func NewLogger(level string) *slog.Logger {
 		lvl = slog.LevelInfo
 	}
 
-	h := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})
+	logFile := LogFilePath()
+	var w io.Writer = os.Stderr
+	if f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666); err == nil {
+		w = io.MultiWriter(os.Stderr, f)
+	}
+
+	h := slog.NewTextHandler(w, &slog.HandlerOptions{Level: lvl})
 	return slog.New(h)
+}
+
+// LogFilePath returns the OS-specific path for the neofs-mount log file.
+func LogFilePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = os.TempDir()
+	}
+	var dir string
+	if runtime.GOOS == "darwin" {
+		dir = filepath.Join(home, "Library", "Logs", "neofs-mount")
+	} else {
+		dir = filepath.Join(home, ".local", "state", "neofs-mount")
+	}
+	_ = os.MkdirAll(dir, 0755)
+	return filepath.Join(dir, "neofs-mount.log")
+}
+
+// OpenLogDirectory opens the directory containing the log file in the OS file manager.
+func OpenLogDirectory() error {
+	logFile := LogFilePath()
+	dir := filepath.Dir(logFile)
+	var cmd *exec.Cmd
+	if runtime.GOOS == "darwin" {
+		cmd = exec.Command("open", dir)
+	} else {
+		cmd = exec.Command("xdg-open", dir)
+	}
+	return cmd.Start()
 }
 
 func EnsureDir(path string, perm os.FileMode) error {

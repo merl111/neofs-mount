@@ -585,10 +585,18 @@ func buildSettingsPage(a fyne.App, w fyne.Window, desk desktop.App) fyne.CanvasO
 		SubmitText: "Save",
 	}
 
+	openLogsBtn := widget.NewButtonWithIcon("Open Logs Directory", theme.FolderIcon(), func() {
+		if err := mountutils.OpenLogDirectory(); err != nil {
+			dialog.ShowError(fmt.Errorf("Failed to open log directory: %w", err), w)
+		}
+	})
+
 	scroll := container.NewVScroll(container.NewVBox(
 		widget.NewLabelWithStyle("Settings", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		widget.NewSeparator(),
 		form,
+		widget.NewSeparator(),
+		container.NewHBox(openLogsBtn),
 	))
 	return scroll
 }
