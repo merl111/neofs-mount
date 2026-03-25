@@ -149,6 +149,19 @@ func (n *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 			}
 		}
 		n.mu.Unlock()
+
+		// containerByUI may not be populated yet (no prior ls of the mount root).
+		// Trigger an on-demand scan to build the name → container ID map, then retry.
+		if _, errno := n.Readdir(ctx); errno == 0 {
+			n.mu.Lock()
+			id, ok := n.containerByUI[name]
+			n.mu.Unlock()
+			if ok {
+				cnr = id
+				goto found
+			}
+		}
+
 		out.SetEntryTimeout(5 * time.Second) // negative: short TTL so retries work
 		return nil, syscall.ENOENT
 	}
@@ -168,7 +181,7 @@ found:
 		path:          "",
 		uploadTracker: n.uploadTracker,
 	}
-	
+
 	out.Attr.Mode = fuse.S_IFDIR | 0o555
 	if !n.ro {
 		out.Attr.Mode = fuse.S_IFDIR | 0o755
@@ -181,6 +194,7 @@ found:
 	st := fs.StableAttr{Mode: fuse.S_IFDIR}
 	return n.NewInode(ctx, child, st), 0
 }
+
 
 func sanitizeDirName(s string) string {
 	s = strings.TrimSpace(s)
