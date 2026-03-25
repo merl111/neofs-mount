@@ -363,13 +363,14 @@ func (n *containerNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 		size := uint64(max0(foundFileSize))
 		fileTime := foundFileTime
 
-		if size == 0 || fileTime.IsZero() {
+		// Only HEAD the object if we genuinely don't know its size.
+		// A missing timestamp is acceptable (shows as epoch); triggering a
+		// network HEAD for every file just to get a timestamp causes ~1s delay
+		// per file when the file explorer opens a directory.
+		if size == 0 {
 			if hdr, err := n.neo.ObjectHead(ctx, n.cnr, foundFile); err == nil {
-				if size == 0 {
-					size = hdr.PayloadSize()
-				}
+				size = hdr.PayloadSize()
 				if fileTime.IsZero() {
-					// Extract timestamp from head fallback
 					for _, a := range hdr.Attributes() {
 						if a.Key() == "Timestamp" || a.Key() == "LastModified" {
 							if t, err := time.Parse(time.RFC3339Nano, a.Value()); err == nil {
