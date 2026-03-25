@@ -1,0 +1,17 @@
+# Binaries
+/bin/
+/dist/
+/fyne-cross/
+
+# IDEs and Tools
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# MacFUSE
+.Spotlight-V100
+.Trashes
+
+# Fyne dependencies
+Icon.png
