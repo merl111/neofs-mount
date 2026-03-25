@@ -3,6 +3,14 @@
 /dist/
 /fyne-cross/
 
+# Root-level built binaries (go build output)
+/neofs-mount
+/neofs-mount-tray
+*.exe
+*.AppImage
+*.dmg
+*.app
+
 # IDEs and Tools
 .idea/
 .vscode/
@@ -15,3 +23,7 @@
 
 # Fyne dependencies
 Icon.png
+
+# Test artifacts
+/tmp/
+*.test
