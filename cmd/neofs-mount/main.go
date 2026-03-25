@@ -243,10 +243,7 @@ func tryUnmount(path string) error {
 	if err := syscall.Unmount(path, 0); err == nil {
 		return nil
 	}
-	// If that fails, try a forced unmount (helps with dead FUSE daemons).
-	if err := syscall.Unmount(path, syscall.MNT_FORCE); err == nil {
-		return nil
-	}
+
 
 	// Fallback: call platform helper (more reliable for FUSE).
 	switch runtime.GOOS {

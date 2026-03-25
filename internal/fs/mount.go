@@ -10,6 +10,7 @@ import (
 
 	"github.com/mathias/neofs-mount/internal/cache"
 	"github.com/mathias/neofs-mount/internal/neofs"
+	"github.com/mathias/neofs-mount/internal/uploads"
 )
 
 type MountParams struct {
@@ -25,6 +26,7 @@ type MountParams struct {
 	CacheSize int64
 
 	IgnoreContainerIDs []string
+	UploadTracker      *uploads.Tracker // optional; enables live upload tracking
 }
 
 type MountedFS struct {
@@ -58,13 +60,13 @@ func Mount(p MountParams) (*MountedFS, error) {
 	}
 
 	root := &rootNode{
-		log: log,
-		neo: neo,
-		cache: cch,
-		// Finder/Explorer can spam readdir/lookup. A longer TTL avoids NeoFS query storms.
-		dirCache: newDirCache(10 * time.Second),
-		ro:  p.ReadOnly,
-		ignoreContainers: makeIgnoreSet(p.IgnoreContainerIDs),
+		log:               log,
+		neo:               neo,
+		cache:             cch,
+		dirCache:          newDirCache(10 * time.Second),
+		ro:                p.ReadOnly,
+		ignoreContainers:  makeIgnoreSet(p.IgnoreContainerIDs),
+		uploadTracker:     p.UploadTracker,
 	}
 
 	entryTTL := 5 * time.Second
