@@ -31,13 +31,23 @@ type Client struct {
 	cw *client.Client // write connection: ObjectPut only (separate from reads)
 	signer user.Signer
 
-	mu           sync.Mutex
-	sessionCache map[sessionCacheKey]cachedSession
+	mu             sync.Mutex
+	sessionCache   map[sessionCacheKey]cachedSession
+	searchStrategy map[string]int // container ID -> searchStrategy* constant
 
 	scanMu       sync.Mutex
 	scanCache    map[string]cachedScanEntries
 	scanInflight map[string]*scanFlight
 }
+
+// searchStrategy* constants track which search method works per container.
+const (
+	searchStrategyUnknown    = 0
+	searchStrategyV2Root     = 1 // SearchV2 with root filter
+	searchStrategyV2All      = 2 // SearchV2 without filter
+	searchStrategyStreamRoot = 3 // legacy ObjectSearch stream with root filter
+	searchStrategyStreamAll  = 4 // legacy stream without filter
+)
 
 type cachedScanEntries struct {
 	at      time.Time
@@ -136,13 +146,14 @@ func New(ctx context.Context, p Params) (*Client, error) {
 	}
 
 	return &Client{
-		log:          log,
-		c:            c,
-		cw:           cw,
-		signer:       signer,
-		sessionCache: make(map[sessionCacheKey]cachedSession),
-		scanCache:    make(map[string]cachedScanEntries),
-		scanInflight: make(map[string]*scanFlight),
+		log:            log,
+		c:              c,
+		cw:             cw,
+		signer:         signer,
+		sessionCache:   make(map[sessionCacheKey]cachedSession),
+		searchStrategy: make(map[string]int),
+		scanCache:      make(map[string]cachedScanEntries),
+		scanInflight:   make(map[string]*scanFlight),
 	}, nil
 }
 
@@ -203,7 +214,7 @@ type SearchEntry struct {
 // objects never change once written, so a long TTL only means slightly stale listings.
 const headScanCacheTTL = 5 * time.Minute
 
-const headScanWorkers = 12
+const headScanWorkers = 32
 
 // InvalidateContainerScan drops cached results from [Client.ListEntriesByHeadScan] for a container.
 func (c *Client) InvalidateContainerScan(containerID cid.ID) {
@@ -355,21 +366,6 @@ func (c *Client) searchAllObjectIDs(ctx context.Context, cnr cid.ID) ([]oid.ID, 
 		return all, nil
 	}
 
-	ids, err := trySearchV2(true)
-	if err != nil {
-		return nil, fmt.Errorf("neofs: list object ids (root): %w", err)
-	}
-	if len(ids) > 0 {
-		return ids, nil
-	}
-	ids, err = trySearchV2(false)
-	if err != nil {
-		return nil, fmt.Errorf("neofs: list object ids (no root filter): %w", err)
-	}
-	if len(ids) > 0 {
-		return ids, nil
-	}
-
 	// Legacy ObjectSearch stream (some deployments differ from SearchV2 behavior).
 	tryStream := func(root bool) ([]oid.ID, error) {
 		var prm client.PrmObjectSearch
@@ -401,19 +397,55 @@ func (c *Client) searchAllObjectIDs(ctx context.Context, cnr cid.ID) ([]oid.ID, 
 		return all, nil
 	}
 
-	ids, err = tryStream(true)
-	if err != nil {
-		return nil, fmt.Errorf("neofs: object search stream (root): %w", err)
+	key := cnr.EncodeToString()
+
+	// Fast path: use the strategy that worked last time.
+	c.mu.Lock()
+	strat := c.searchStrategy[key]
+	c.mu.Unlock()
+
+	try := func(s int) ([]oid.ID, error) {
+		switch s {
+		case searchStrategyV2Root:
+			return trySearchV2(true)
+		case searchStrategyV2All:
+			return trySearchV2(false)
+		case searchStrategyStreamRoot:
+			return tryStream(true)
+		case searchStrategyStreamAll:
+			return tryStream(false)
+		}
+		return nil, nil
 	}
-	if len(ids) > 0 {
-		return ids, nil
+
+	if strat != searchStrategyUnknown {
+		ids, err := try(strat)
+		if err == nil && len(ids) > 0 {
+			return ids, nil
+		}
+		// Strategy no longer works (e.g. container emptied or node upgrade); fall through.
+		c.mu.Lock()
+		delete(c.searchStrategy, key)
+		c.mu.Unlock()
 	}
-	ids, err = tryStream(false)
-	if err != nil {
-		return nil, fmt.Errorf("neofs: object search stream (no root filter): %w", err)
+
+	// Discovery: try all strategies in order and remember the winner.
+	ordered := []int{searchStrategyV2Root, searchStrategyV2All, searchStrategyStreamRoot, searchStrategyStreamAll}
+	for _, s := range ordered {
+		ids, err := try(s)
+		if err != nil {
+			continue // try next
+		}
+		if len(ids) > 0 {
+			c.mu.Lock()
+			c.searchStrategy[key] = s
+			c.mu.Unlock()
+			return ids, nil
+		}
 	}
-	return ids, nil
+	return nil, nil
 }
+
 
 func (c *Client) entriesFromHeadsParallel(ctx context.Context, cnr cid.ID, ids []oid.ID) ([]SearchEntry, error) {
 	if len(ids) == 0 {
