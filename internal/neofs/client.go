@@ -27,15 +27,16 @@ import (
 type Client struct {
 	log *slog.Logger
 
-	c      *client.Client
+	c  *client.Client // read connection: LIST, HEAD, GET, SEARCH
+	cw *client.Client // write connection: ObjectPut only (separate from reads)
 	signer user.Signer
 
 	mu           sync.Mutex
 	sessionCache map[sessionCacheKey]cachedSession
 
 	scanMu       sync.Mutex
-	scanCache    map[string]cachedScanEntries // container ID string -> head-scan listing
-	scanInflight map[string]*scanFlight      // coalesce concurrent head-scans per container
+	scanCache    map[string]cachedScanEntries
+	scanInflight map[string]*scanFlight
 }
 
 type cachedScanEntries struct {
@@ -116,9 +117,28 @@ func New(ctx context.Context, p Params) (*Client, error) {
 		return nil, fmt.Errorf("neofs: dial: %w", err)
 	}
 
+	// Write connection: dedicated to ObjectPut so large upload streams
+	// don't block concurrent reads (LIST, HEAD, SEARCH) on the main connection.
+	var prmInitW client.PrmInit
+	cw, err := client.New(prmInitW)
+	if err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("neofs: write client init: %w", err)
+	}
+	var prmDialW client.PrmDial
+	prmDialW.SetServerURI(p.Endpoint)
+	prmDialW.SetContext(ctx)
+	prmDialW.SetTimeout(15 * time.Second)
+	prmDialW.SetStreamTimeout(72 * time.Hour)
+	if err := cw.Dial(prmDialW); err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("neofs: write dial: %w", err)
+	}
+
 	return &Client{
 		log:          log,
 		c:            c,
+		cw:           cw,
 		signer:       signer,
 		sessionCache: make(map[sessionCacheKey]cachedSession),
 		scanCache:    make(map[string]cachedScanEntries),
@@ -127,10 +147,22 @@ func New(ctx context.Context, p Params) (*Client, error) {
 }
 
 func (c *Client) Close() error {
-	if c == nil || c.c == nil {
+	if c == nil {
 		return nil
 	}
-	return c.c.Close()
+	var errs []error
+	if c.c != nil {
+		errs = append(errs, c.c.Close())
+	}
+	if c.cw != nil {
+		errs = append(errs, c.cw.Close())
+	}
+	for _, e := range errs {
+		if e != nil {
+			return e
+		}
+	}
+	return nil
 }
 
 // Balance retrieves the NeoFS account balance for the configured wallet.
@@ -482,7 +514,7 @@ func (c *Client) ObjectPutContentType(ctx context.Context, containerID cid.ID, r
 	var prm client.PrmObjectPutInit
 	prm.WithinSession(st)
 
-	w, err := c.c.ObjectPutInit(ctx, *obj, c.signer, prm)
+	w, err := c.cw.ObjectPutInit(ctx, *obj, c.signer, prm)
 	if err != nil {
 		return oid.ID{}, err
 	}
