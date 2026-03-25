@@ -63,7 +63,7 @@ func Mount(p MountParams) (*MountedFS, error) {
 		log:               log,
 		neo:               neo,
 		cache:             cch,
-		dirCache:          newDirCache(10 * time.Second),
+		dirCache:          newDirCache(5 * time.Minute),
 		ro:                p.ReadOnly,
 		ignoreContainers:  makeIgnoreSet(p.IgnoreContainerIDs),
 		uploadTracker:     p.UploadTracker,
