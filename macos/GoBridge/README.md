@@ -11,3 +11,5 @@ go build -buildmode=c-archive -o libneofsfp.a .
 The C API is declared in `../NeoFSMount/Shared/neofs_fp_api.h` and must stay aligned with `fp_export.go`.
 
 Requires **Go on macOS** with **CGO** and **Xcode command-line tools** (for the Darwin `clang` toolchain).
+
+When linking the archive into a binary or dylib, also pass **`-lpthread`** and **`-lresolv`** (Go’s runtime uses the macOS resolver symbols `res_9_*`). The Xcode project sets these in `OTHER_LDFLAGS`.
