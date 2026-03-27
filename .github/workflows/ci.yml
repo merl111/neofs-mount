@@ -18,7 +18,15 @@ jobs:
         with:
           go-version: '>=1.24.0'
 
+      # neofs-mount-tray (Fyne) needs CGO + OpenGL/X11 headers on Linux (same as release.yml).
+      - name: Install Fyne / GLFW dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc pkg-config libgl1-mesa-dev xorg-dev
+
       - name: Test
+        env:
+          CGO_ENABLED: "1"
         run: go test ./... -count=1 -short
 
       - name: Cross-compile neofs-mount for darwin (pure Go, no tray)

@@ -1,8 +1,8 @@
 import FileProvider
 import Foundation
 import os.log
+import UniformTypeIdentifiers
 
-@objc(FileProviderExtension)
 final class FileProviderExtension: NSFileProviderReplicatedExtension {
     private let logger = Logger(subsystem: "org.neofs.mount", category: "FileProvider")
 
@@ -46,11 +46,13 @@ final class RootFolderItem: NSObject, NSFileProviderItem {
     var itemIdentifier: NSFileProviderItemIdentifier { .rootContainer }
     var parentItemIdentifier: NSFileProviderItemIdentifier { .rootContainer }
     var filename: String { "NeoFS" }
-    var typeIdentifier: String { "public.folder" }
+    var contentType: UTType { .folder }
     var capabilities: NSFileProviderItemCapabilities { [.allowsReading, .allowsWriting, .allowsContentEnumerating, .allowsReparenting] }
 }
 
 final class EmptyEnumerator: NSObject, NSFileProviderEnumerator {
+    func invalidate() {}
+
     func enumerateItems(for observer: NSFileProviderEnumerationObserver, startingAt page: NSFileProviderPage) {
         observer.finishEnumerating(upTo: nil)
     }
