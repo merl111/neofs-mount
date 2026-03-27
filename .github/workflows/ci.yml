@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  go-linux:
+    name: Go (Linux + darwin/amd64 CLI cross-compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '>=1.24.0'
+
+      - name: Test
+        run: go test ./... -count=1 -short
+
+      - name: Cross-compile neofs-mount for darwin (pure Go, no tray)
+        run: |
+          set -e
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/neofs-mount
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o /dev/null ./cmd/neofs-mount
+
+  macos-xcode:
+    name: macOS File Provider (Xcode + Go c-archive)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '>=1.24.0'
+
+      - name: Build NeoFSMount.app (ad-hoc sign)
+        run: |
+          set -e
+          cd macos/NeoFSMount
+          xcodebuild \
+            -project NeoFSMount.xcodeproj \
+            -scheme NeoFSMount \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=YES \
+            build

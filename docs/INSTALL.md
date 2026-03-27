@@ -27,21 +27,35 @@ Other file managers (Dolphin, Thunar, etc.) do not use this location; you can st
 
 ## macOS
 
-### Install macFUSE
+### Native path: File Provider (recommended)
 
-Install macFUSE from the official installer. You may need to approve the system extension in **System Settings → Privacy & Security**.
+NeoFS containers are exposed through Apple’s **File Provider** framework (Finder integration), not kernel FUSE:
+
+1. Build **`NeoFSMount.app`** from [`macos/NeoFSMount`](../macos/NeoFSMount/README.md) with Xcode (Go + CGO required for the embedded static library).
+2. Install the app (bundle identifier **`org.neofs.mount`**). Use the same config as the tray: **`~/Library/Application Support/neofs-mount/config.toml`**.
+3. In the app, register the **File Provider** domain, then open **Finder** and look for **NeoFS** under Locations / sidebar.
+
+The Fyne tray’s **Mount** action runs `open -gn -b org.neofs.mount` to launch this app when it is installed. **Unmount** in the tray does not tear down File Provider domains; disconnect or quit from the host app as appropriate.
+
+Override the bundle id with env **`NEOFS_FP_BUNDLE_ID`** if you use a custom signing identity.
+
+### Optional: macFUSE (legacy POSIX mount)
+
+If you maintain a **custom FUSE build** of neoFS-mount (not shipped in the default `linux`-only FUSE tag set), you could still use macFUSE for a directory mount—this is **not** the default integration anymore.
 
 ### Unmount
 
-- `umount <mountpoint>`
+- **File Provider:** disconnect via the neoFS Mount app / Finder (not `umount` on a mountpoint).
+- **Legacy FUSE only:** `umount -f <mountpoint>`
 
 ## Common problems
 
 ### “permission denied” when mounting
 
-- Check FUSE permissions (Linux), and ensure the mountpoint exists and is owned by your user.
+- **Linux:** Check FUSE permissions and that the mountpoint exists and is owned by your user.
+- **macOS (File Provider):** Ensure the app is signed with appropriate **File Provider** / **App Group** entitlements for distribution builds.
 
-### `fusermount exited with code 256` (or similar)
+### `fusermount exited with code 256` (or similar) — Linux
 
 That value is the Unix wait status for **exit code 1** from `fusermount3` / `fusermount` — the helper refused the mount (busy mountpoint, stale FUSE session, non-empty directory, etc.). Try lazy unmount, then mount again:
 
@@ -53,5 +67,5 @@ Use `fusermount -u -z` if `fusermount3` is not installed. Ensure the directory i
 
 ### Finder shows errors / hangs
 
-- FUSE filesystems can get hit with lots of metadata reads. Use caching options once available and try mounting with read-only if you only need browsing.
-
+- **Linux FUSE:** The kernel can issue many metadata reads; try read-only if you only need browsing.
+- **macOS File Provider:** Enumeration and fetch are implemented incrementally; ensure the NeoFS endpoint and wallet in `config.toml` are valid (**Connect NeoFS** in the host app calls the Go bridge).

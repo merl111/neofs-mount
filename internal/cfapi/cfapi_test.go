@@ -1,5 +1,6 @@
+//go:build windows
+
 // Package cfapi_test provides integration tests for the Windows Cloud Files API bindings.
-// These tests will be auto-skipped on non-Windows platforms.
 package cfapi_test
 
 import (

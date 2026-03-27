@@ -72,7 +72,7 @@ func staleUnmountHelp(path string) string {
 	case "linux":
 		return fmt.Sprintf("Try:\n  fusermount3 -u -z %s\n  # or\n  fusermount -u -z %s", path, path)
 	case "darwin":
-		return fmt.Sprintf("Try:\n  umount -f %s", path)
+		return fmt.Sprintf("File Provider: disconnect via the neoFS Mount app. Legacy FUSE: umount -f %s", path)
 	default:
 		return fmt.Sprintf("Try unmounting the path: %s", path)
 	}
