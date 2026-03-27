@@ -16,8 +16,9 @@ import (
 )
 
 func TestMount_ListAndRW(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("unsupported OS for integration mount test")
+	// FUSE mount is Linux-only; macOS uses File Provider (native app), not this test path.
+	if runtime.GOOS != "linux" {
+		t.Skip("FUSE integration mount runs on Linux only")
 	}
 
 	endpoint := os.Getenv("NEOFS_ENDPOINT")

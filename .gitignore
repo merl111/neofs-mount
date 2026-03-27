@@ -16,6 +16,9 @@
 /neofs-mount-tray
 /linuxdeploy*.AppImage
 
+# Xcode (macOS File Provider sources)
+macos/**/*.xcuserdata/
+
 # IDEs and Tools
 .idea/
 .vscode/

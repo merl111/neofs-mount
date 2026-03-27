@@ -115,6 +115,11 @@ tidy:
 test:
 	go test ./...
 
+# Cross-compile CLI for Darwin from Linux CI (pure Go; tray needs macOS + CGO for Fyne).
+ci-darwin-cli:
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/neofs-mount
+	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o /dev/null ./cmd/neofs-mount
+
 lint:
 	go vet ./...
 

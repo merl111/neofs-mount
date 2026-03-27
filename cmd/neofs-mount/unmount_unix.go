@@ -33,6 +33,7 @@ func tryUnmount(path string) error {
 			return fmt.Errorf("fusermount -u -z failed: %w", err)
 		}
 	case "darwin":
+		// Optional: legacy macFUSE path if still mounted at a directory.
 		if p, err := exec.LookPath("umount"); err == nil {
 			if out, err := exec.Command(p, "-f", path).CombinedOutput(); err == nil {
 				_ = out
@@ -50,7 +51,7 @@ func staleUnmountHelp(path string) string {
 	case "linux":
 		return fmt.Sprintf("Try:\n  fusermount3 -u -z %s\n  # or\n  fusermount -u -z %s", path, path)
 	case "darwin":
-		return fmt.Sprintf("Try:\n  umount -f %s", path)
+		return fmt.Sprintf("Native neoFS Mount uses File Provider in Finder, not a directory mount — use the host app to disconnect.\nIf you used legacy FUSE/macFUSE:\n  umount -f %s", path)
 	default:
 		return fmt.Sprintf("Try unmounting the path: %s", path)
 	}

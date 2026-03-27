@@ -3,9 +3,9 @@
 package fs
 
 // Windows mount adapter â€” delegates to internal/cfapi instead of go-fuse.
-// The public API (MountParams, MountedFS, Mount, Unmount, Shutdown) is
-// identical to the Linux/macOS version in mount.go so the tray app compiles
-// unchanged on all platforms.
+// The public API (MountParams, MountedFS, Mount, Unmount, Shutdown) matches
+// mount.go (Linux FUSE) and mount_darwin.go (macOS File Provider) so the tray
+// app compiles unchanged on all platforms.
 
 import (
 	"context"
@@ -32,35 +32,6 @@ import (
 
 // errUploadClosedSkipped means we intentionally did not ObjectPut (dedupe uses nil, not this).
 var errUploadClosedSkipped = errors.New("cfapi: upload closed skipped")
-
-// MountParams mirrors the Linux/macOS definition exactly.
-type MountParams struct {
-	Logger *slog.Logger
-
-	Endpoint  string
-	WalletKey string
-
-	Mountpoint string
-	ReadOnly   bool
-
-	CacheDir  string
-	CacheSize int64
-
-	IgnoreContainerIDs []string
-	UploadTracker      *uploads.Tracker
-	UploadHistory      *uploads.History
-
-	// AuditLogPath is the append-only JSONL audit file; empty disables.
-	AuditLogPath string
-
-	// FetchDirCacheTTL is how long directory placeholder listings are reused before
-	// re-querying NeoFS. Zero means 5 seconds.
-	FetchDirCacheTTL time.Duration
-
-	// HydrationCacheMaxObjectBytes caps full-object downloads into the disk cache for
-	// FetchData; larger objects use ranged network reads only. Zero means 64 MiB.
-	HydrationCacheMaxObjectBytes int64
-}
 
 // MountedFS mirrors the Linux/macOS definition.
 type MountedFS struct {
