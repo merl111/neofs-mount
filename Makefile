@@ -41,15 +41,21 @@ endif
 WIN_CGO_CFLAGS := -O2 -g0 -fno-asynchronous-unwind-tables
 WIN_TRAY_GO := -trimpath -ldflags '-s -w -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME) -H windowsgui'
 WIN_CLI_GO  := -trimpath -ldflags '-s -w -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)'
+# PE icon COFF objects must not live under cmd/...: Go links *.syso for every GOOS, which breaks Linux and fyne-cross (lld: unknown file type).
+WIN_PE_RSRC_TRAY := win/pe-rsrc/neofs-mount-tray.syso
+WIN_PE_RSRC_CLI := win/pe-rsrc/neofs-mount.syso
 
 ifeq ($(OS),Windows_NT)
 build-windows: $(CFAPI_IMPLIB) $(BIN_DIR)/neofs-shellcmd.dll
 	$(call mkdir_p,$(BIN_DIR))
+	powershell -NoProfile -Command "Copy-Item -Force '$(subst /,\,$(WIN_PE_RSRC_TRAY))' 'cmd\neofs-mount-tray\rsrc.syso'; Copy-Item -Force '$(subst /,\,$(WIN_PE_RSRC_CLI))' 'cmd\neofs-mount\rsrc.syso'"
 	powershell -NoProfile -Command "$$env:CGO_ENABLED='1'; $$env:GOOS='windows'; $$env:GOARCH='amd64'; $$env:CGO_CFLAGS='$(WIN_CGO_CFLAGS)'; go build $(WIN_TRAY_GO) -o '$(BIN_DIR)/neofs-mount-tray.exe' './cmd/neofs-mount-tray'"
 	powershell -NoProfile -Command "$$env:CGO_ENABLED='1'; $$env:GOOS='windows'; $$env:GOARCH='amd64'; $$env:CGO_CFLAGS='$(WIN_CGO_CFLAGS)'; go build $(WIN_CLI_GO) -o '$(BIN_DIR)/neofs-mount.exe' './cmd/neofs-mount'"
 else
 build-windows: $(CFAPI_IMPLIB)
 	$(call mkdir_p,$(BIN_DIR))
+	cp $(WIN_PE_RSRC_TRAY) cmd/neofs-mount-tray/rsrc.syso
+	cp $(WIN_PE_RSRC_CLI) cmd/neofs-mount/rsrc.syso
 	CGO_CFLAGS=$(WIN_CGO_CFLAGS) CGO_ENABLED=1 GOOS=windows GOARCH=amd64 go build $(WIN_TRAY_GO) -o $(BIN_DIR)/neofs-mount-tray.exe ./cmd/neofs-mount-tray
 	CGO_CFLAGS=$(WIN_CGO_CFLAGS) CGO_ENABLED=1 GOOS=windows GOARCH=amd64 go build $(WIN_CLI_GO) -o $(BIN_DIR)/neofs-mount.exe ./cmd/neofs-mount
 endif

@@ -4,7 +4,10 @@ package fs
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -116,6 +119,11 @@ func Mount(p MountParams) (*MountedFS, error) {
 			DisableXAttrs: false,
 		},
 	}
+	// On Linux, try syscall.Mount on /dev/fuse first; if that works we avoid fusermount3.
+	// When fusermount exits with status 1 (often reported as “code 256”), direct mount frequently still succeeds.
+	if runtime.GOOS == "linux" {
+		opts.MountOptions.DirectMount = true
+	}
 
 	server, err := fs.Mount(p.Mountpoint, root, opts)
 	if err != nil {
@@ -123,10 +131,30 @@ func Mount(p MountParams) (*MountedFS, error) {
 		if auditLog != nil {
 			_ = auditLog.Close()
 		}
+		err = wrapFuseMountError(p.Mountpoint, err)
 		return nil, err
 	}
 
 	return &MountedFS{log: log, server: server, neo: neo, audit: auditLog}, nil
+}
+
+func wrapFuseMountError(mountpoint string, err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "fusermount") {
+		return err
+	}
+	return fmt.Errorf("%w\n\n"+
+		"Fusermount failed (exit status 1 is often shown as “256”). Common fixes:\n"+
+		"  • Lazy-unmount a stuck FUSE mount, then retry:\n"+
+		"      fusermount3 -u -z %q\n"+
+		"    (or: fusermount -u -z … on older systems)\n"+
+		"  • Ensure the mountpoint directory exists, is empty, and is not already a mount.\n"+
+		"  • Check /etc/fuse.conf (user_allow_other, mount_max) and that fuse3 is installed.\n"+
+		"  • This build tries kernel FUSE mount first on Linux; if you still see this, paste the full error.",
+		err, mountpoint)
 }
 
 func (m *MountedFS) Unmount() error {

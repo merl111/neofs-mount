@@ -287,6 +287,10 @@ func (n *containerNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 	if name == "" || strings.Contains(name, "/") || name == "." || name == ".." {
 		return nil, syscall.ENOENT
 	}
+	if isEphemeralEditorHiddenName(name) {
+		out.SetEntryTimeout(5 * time.Second)
+		return nil, syscall.ENOENT
+	}
 
 	prefix := joinRel(n.path, name)
 
@@ -767,6 +771,9 @@ func (n *containerNode) listChildren(ctx context.Context) ([]fuse.DirEntry, sysc
 		}
 
 		if hasSlash {
+			if isEphemeralEditorHiddenName(seg) {
+				continue
+			}
 			// It's a descendant of a subdirectory; create/keep dir child.
 			info := children[seg]
 			info.isDir = true
@@ -776,6 +783,9 @@ func (n *containerNode) listChildren(ctx context.Context) ([]fuse.DirEntry, sysc
 		}
 
 		// Direct file.
+		if isEphemeralEditorHiddenName(seg) {
+			continue
+		}
 		// If there is both a file and a dir with the same name, prefer dir.
 		info := children[seg]
 		if info.isDir {
@@ -1229,11 +1239,26 @@ func (h *uploadFileHandle) Release(ctx context.Context) syscall.Errno {
 	_ = h.f.Close()
 	h.f = nil
 
+	tmpPath := h.tmpPath
+	relPath := h.relPath
+	if isEphemeralEditorHiddenName(filepath.Base(relPath)) {
+		_ = os.Remove(tmpPath)
+		if h.dirCache != nil {
+			h.dirCache.InvalidateContainer(h.cnr.EncodeToString())
+		}
+		h.neo.InvalidateContainerScan(h.cnr)
+		if h.audit != nil {
+			h.audit.Record("object_put_skipped", map[string]any{
+				"source": "fuse_release", "reason": "ephemeral_editor_temp",
+				"container_id": h.cnr.EncodeToString(), "object_path": filepath.ToSlash(relPath),
+			})
+		}
+		return 0
+	}
+
 	// Capture values for the background goroutine
 	ctxBg := context.Background()
 	cnr := h.cnr
-	relPath := h.relPath
-	tmpPath := h.tmpPath
 	neo := h.neo
 	cacheStore := h.cache
 	node := h.node

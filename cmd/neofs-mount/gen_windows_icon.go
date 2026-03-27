@@ -6,4 +6,4 @@ package main
 //	go generate ./cmd/neofs-mount-tray
 //	go generate ./cmd/neofs-mount
 //
-//go:generate go run github.com/akavel/rsrc@v0.10.2 -ico ../neofs-mount-tray/app.ico -arch amd64 -o rsrc.syso
+//go:generate go run github.com/akavel/rsrc@v0.10.2 -ico ../neofs-mount-tray/app.ico -arch amd64 -o ../../win/pe-rsrc/neofs-mount.syso
