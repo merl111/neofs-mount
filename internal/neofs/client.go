@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,134 @@ const (
 type cachedScanEntries struct {
 	at      time.Time
 	entries []SearchEntry
+	trie    *listingTrie // immediate children per NeoFS path prefix; built with entries
+}
+
+// listingTrie indexes object paths for O(depth) directory listing without scanning all entries.
+type listingTrie struct {
+	root *listingTrieNode
+}
+
+type listingTrieNode struct {
+	children map[string]*listingTrieNode
+	order    []string // stable child name order (insertion order)
+	file     *SearchEntry
+}
+
+func entryPathKey(e *SearchEntry) string {
+	key := e.FilePath
+	if key == "" {
+		key = e.Key
+	}
+	if key == "" {
+		key = e.Name
+	}
+	if key == "" {
+		key = e.FileName
+	}
+	if key == "" {
+		return ""
+	}
+	return strings.TrimPrefix(key, "/")
+}
+
+// normalizeNeoFSPrefix converts a caller prefix (e.g. from filepath.Join) to NeoFS slash form.
+func normalizeNeoFSPrefix(prefix string) string {
+	prefix = filepath.ToSlash(strings.TrimSpace(prefix))
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "" {
+		return ""
+	}
+	return prefix + "/"
+}
+
+func buildListingTrie(entries []SearchEntry) *listingTrie {
+	t := &listingTrie{root: &listingTrieNode{}}
+	for i := range entries {
+		key := entryPathKey(&entries[i])
+		if key == "" {
+			continue
+		}
+		segs := strings.Split(key, "/")
+		var nonE []string
+		for _, s := range segs {
+			if s != "" {
+				nonE = append(nonE, s)
+			}
+		}
+		if len(nonE) == 0 {
+			continue
+		}
+		t.insertSegments(nonE, &entries[i])
+	}
+	return t
+}
+
+func (t *listingTrie) insertSegments(segs []string, e *SearchEntry) {
+	cur := t.root
+	for i := 0; i < len(segs); i++ {
+		s := segs[i]
+		if cur.children == nil {
+			cur.children = make(map[string]*listingTrieNode)
+		}
+		next := cur.children[s]
+		if next == nil {
+			next = &listingTrieNode{}
+			cur.children[s] = next
+			cur.order = append(cur.order, s)
+		}
+		cur = next
+		if i < len(segs)-1 {
+			// Longer paths make this segment a directory; drop a file parked at an intermediate.
+			cur.file = nil
+		}
+	}
+	// File leaf only if nothing already lives beneath this path (matches linear scan first-wins).
+	if len(cur.children) == 0 && cur.file == nil {
+		cur.file = e
+	}
+}
+
+func (t *listingTrie) listImmediateChildren(prefix string) []DirEntry {
+	prefix = normalizeNeoFSPrefix(prefix)
+	cur := t.root
+	if prefix != "" {
+		segs := strings.Split(strings.TrimSuffix(prefix, "/"), "/")
+		for _, s := range segs {
+			if s == "" {
+				continue
+			}
+			if cur.children == nil {
+				return nil
+			}
+			next := cur.children[s]
+			if next == nil {
+				return nil
+			}
+			cur = next
+		}
+	}
+
+	var out []DirEntry
+	for _, name := range cur.order {
+		ch := cur.children[name]
+		if ch == nil {
+			continue
+		}
+		if len(ch.children) > 0 {
+			out = append(out, DirEntry{Name: name, IsDirectory: true})
+			continue
+		}
+		if ch.file != nil {
+			out = append(out, DirEntry{
+				Name:     name,
+				ObjectID: ch.file.ObjectID.EncodeToString(),
+				Size:     ch.file.Size,
+			})
+			continue
+		}
+	}
+	return out
 }
 
 // scanFlight lets parallel ListEntriesByHeadScan callers wait on one object listing + head pass.
@@ -272,7 +401,11 @@ func (c *Client) ListEntriesByHeadScan(ctx context.Context, containerID cid.ID) 
 		defer func() {
 			c.scanMu.Lock()
 			if err == nil {
-				c.scanCache[key] = cachedScanEntries{at: time.Now(), entries: entries}
+				c.scanCache[key] = cachedScanEntries{
+					at:      time.Now(),
+					entries: entries,
+					trie:    buildListingTrie(entries),
+				}
 			} else {
 				fl.setErr(err)
 			}
@@ -526,49 +659,79 @@ func (c *Client) ListEntriesByPrefix(ctx context.Context, containerIDStr, prefix
 	if err := containerID.DecodeString(containerIDStr); err != nil {
 		return nil, fmt.Errorf("neofs: invalid container ID %q: %w", containerIDStr, err)
 	}
+	prefix = normalizeNeoFSPrefix(prefix)
 
-	entries, _, err := c.ListEntriesByHeadScan(ctx, containerID)
-	if err != nil {
+	cidKey := containerID.EncodeToString()
+	now := time.Now()
+
+	c.scanMu.Lock()
+	if ent, ok := c.scanCache[cidKey]; ok && now.Sub(ent.at) < headScanCacheTTL && ent.trie != nil {
+		out := ent.trie.listImmediateChildren(prefix)
+		if len(out) == 0 && len(ent.entries) > 0 {
+			if alt := listEntriesByPrefixLinear(ent.entries, prefix); len(alt) > 0 {
+				out = alt
+			}
+		}
+		c.scanMu.Unlock()
+		return out, nil
+	}
+	c.scanMu.Unlock()
+
+	if _, _, err := c.ListEntriesByHeadScan(ctx, containerID); err != nil {
 		return nil, err
 	}
 
+	c.scanMu.Lock()
+	ent, ok := c.scanCache[cidKey]
+	tr := ent.trie
+	c.scanMu.Unlock()
+	if !ok || tr == nil {
+		entries, _, err := c.ListEntriesByHeadScan(ctx, containerID)
+		if err != nil {
+			return nil, err
+		}
+		return listEntriesByPrefixLinear(entries, prefix), nil
+	}
+	out := tr.listImmediateChildren(prefix)
+	if len(out) == 0 && len(ent.entries) > 0 {
+		if alt := listEntriesByPrefixLinear(ent.entries, prefix); len(alt) > 0 {
+			out = alt
+		}
+	}
+	return out, nil
+}
+
+func listEntriesByPrefixLinear(entries []SearchEntry, prefix string) []DirEntry {
 	seen := map[string]struct{}{}
 	var result []DirEntry
-
-	for _, e := range entries {
-		key := e.FilePath
+	for i := range entries {
+		e := &entries[i]
+		key := entryPathKey(e)
 		if key == "" {
-			key = e.Key
+			continue
 		}
-		if key == "" {
-			key = e.Name
-		}
-		key = strings.TrimPrefix(key, "/")
-
 		if !strings.HasPrefix(key, prefix) {
 			continue
 		}
-
 		rest := strings.TrimPrefix(key, prefix)
 		if rest == "" {
 			continue
 		}
-
-		// Direct child vs. sub-directory.
 		if idx := strings.Index(rest, "/"); idx != -1 {
-			// It's a sub-directory entry.
 			dirName := rest[:idx]
+			if dirName == "" {
+				continue
+			}
 			if _, ok := seen[dirName]; ok {
 				continue
 			}
 			seen[dirName] = struct{}{}
-			result = append(result, DirEntry{
-				Name:        dirName,
-				IsDirectory: true,
-			})
+			result = append(result, DirEntry{Name: dirName, IsDirectory: true})
 		} else {
-			// Direct file child.
 			name := rest
+			if name == "" {
+				continue
+			}
 			if _, ok := seen[name]; ok {
 				continue
 			}
@@ -580,7 +743,29 @@ func (c *Client) ListEntriesByPrefix(ctx context.Context, containerIDStr, prefix
 			})
 		}
 	}
-	return result, nil
+	return result
+}
+
+// FindObjectIDsByExactPath returns object IDs whose FilePath or Key attribute
+// matches relPath (slash-separated, no leading slash).
+func (c *Client) FindObjectIDsByExactPath(ctx context.Context, cnr cid.ID, relPath string) ([]oid.ID, error) {
+	if c == nil || c.c == nil {
+		return nil, errors.New("neofs: nil client")
+	}
+	relPath = strings.TrimPrefix(relPath, "/")
+	entries, _, err := c.ListEntriesByHeadScan(ctx, cnr)
+	if err != nil {
+		return nil, err
+	}
+	var out []oid.ID
+	for _, e := range entries {
+		fp := strings.TrimPrefix(e.FilePath, "/")
+		ky := strings.TrimPrefix(e.Key, "/")
+		if fp == relPath || ky == relPath {
+			out = append(out, e.ObjectID)
+		}
+	}
+	return out, nil
 }
 
 // ReadObjectRange streams a byte range from a NeoFS object and returns it as a

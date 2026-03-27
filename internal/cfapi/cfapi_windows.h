@@ -11,12 +11,21 @@
 #include <windows.h>
 #include <objidl.h>   /* LPCWSTR, GUID, ... */
 
+/* NTSTATUS is not defined by MinGW's windows.h when WIN32_LEAN_AND_MEAN is set */
+#ifndef NTSTATUS
+typedef LONG NTSTATUS;
+#endif
+
 // ── provider registration ─────────────────────────────────────────────────
 
 typedef struct CF_SYNC_REGISTRATION {
     DWORD     StructSize;
     LPCWSTR   ProviderName;
     LPCWSTR   ProviderVersion;
+    LPCVOID   SyncRootIdentity;
+    DWORD     SyncRootIdentityLength;
+    LPCVOID   FileIdentity;
+    DWORD     FileIdentityLength;
     GUID      ProviderId;
 } CF_SYNC_REGISTRATION;
 
@@ -43,6 +52,9 @@ typedef struct CF_POPULATION_POLICY {
     WORD                         Modifier;
 } CF_POPULATION_POLICY;
 
+#define CF_INSYNC_POLICY_NONE                               0x00000000
+#define CF_INSYNC_POLICY_PRESERVE_INSYNC_FOR_SYNC_ENGINE 0x80000000
+
 typedef struct CF_SYNC_POLICIES {
     DWORD                StructSize;
     CF_HYDRATION_POLICY  Hydration;
@@ -62,6 +74,10 @@ HRESULT WINAPI CfRegisterSyncRoot(
 HRESULT WINAPI CfUnregisterSyncRoot(
     LPCWSTR SyncRootPath
 );
+
+#ifndef CF_REGISTER_FLAG_UPDATE
+#define CF_REGISTER_FLAG_UPDATE 0x00000001
+#endif
 
 // ── connection / callbacks ─────────────────────────────────────────────────
 
@@ -88,9 +104,8 @@ typedef struct CF_CALLBACK_INFO {
     DWORD               StructSize;
     CF_CONNECTION_KEY   ConnectionKey;
     LPVOID              CallbackContext;
-    LPCWSTR             VolumeDosName;
     LPCWSTR             VolumeGuidName;
-    LPCWSTR             VolumeName;
+    LPCWSTR             VolumeDosName;
     DWORD               VolumeSerialNumber;
     LARGE_INTEGER       SyncRootFileId;
     LPCVOID             SyncRootIdentity;
@@ -102,15 +117,19 @@ typedef struct CF_CALLBACK_INFO {
     LPCWSTR             NormalizedPath;
     LARGE_INTEGER       TransferKey;
     BYTE                PriorityHint;
-    PKOROUTINE_WAIT_BLOCK CorrelationVector; /* opaque for us */
+    CONST void*         CorrelationVector; /* opaque for us */
     LPVOID              ProcessInfo;
     LARGE_INTEGER       RequestKey;
 } CF_CALLBACK_INFO;
 
+/* Layout must match Windows SDK cfapi.h — the first DWORD of FetchData is Flags,
+ * not RequiredFileOffset. An incorrect layout reads garbage offsets/lengths and can
+ * crash cldapi / Explorer. */
 typedef struct CF_CALLBACK_PARAMETERS {
     DWORD   ParamSize;
     union {
         struct {
+            DWORD         Flags;
             LARGE_INTEGER RequiredFileOffset;
             LARGE_INTEGER RequiredLength;
             LARGE_INTEGER OptionalFileOffset;
@@ -119,13 +138,32 @@ typedef struct CF_CALLBACK_PARAMETERS {
             DWORD         LastDehydrationReason;
         } FetchData;
         struct {
-            LARGE_INTEGER FileOffset;
-            LARGE_INTEGER Length;
+            DWORD         Flags;
+            LARGE_INTEGER RequiredFileOffset;
+            LARGE_INTEGER RequiredLength;
         } ValidateData;
         struct {
-            DWORD Flags;
+            DWORD   Flags;
+            LPCWSTR Pattern;
         } FetchPlaceholders;
-        DWORD RawParams[32]; /* safe padding */
+        struct {
+            DWORD Flags;
+        } CloseCompletion;
+        struct {
+            DWORD Flags;
+        } Delete;
+        struct {
+            DWORD Flags;
+        } DeleteCompletion;
+        struct {
+            DWORD   Flags;
+            LPCWSTR TargetPath;
+        } Rename;
+        struct {
+            DWORD   Flags;
+            LPCWSTR SourcePath;
+        } RenameCompletion;
+        DWORD RawParams[32];
     };
 } CF_CALLBACK_PARAMETERS;
 
@@ -166,6 +204,11 @@ typedef struct CF_FS_METADATA {
     LARGE_INTEGER FileSize;
 } CF_FS_METADATA;
 
+#define CF_PLACEHOLDER_CREATE_FLAG_NONE                           0x00000000
+#define CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC                  0x00000001
+#define CF_PLACEHOLDER_CREATE_FLAG_SUPERSEDE                     0x00000002
+#define CF_PLACEHOLDER_CREATE_FLAG_DISABLE_ON_DEMAND_POPULATION  0x00000008
+
 typedef struct CF_PLACEHOLDER_CREATE_INFO {
     LPCWSTR         RelativeFileName;
     CF_FS_METADATA  FsMetadata;
@@ -196,13 +239,17 @@ typedef enum CF_OPERATION_TYPE {
     CF_OPERATION_TYPE_ACK_RENAME           = 7,
 } CF_OPERATION_TYPE;
 
+#define CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE                              0
+#define CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION    0x00000001
+
 typedef struct CF_OPERATION_INFO {
     DWORD             StructSize;
     CF_OPERATION_TYPE Type;
     CF_CONNECTION_KEY ConnectionKey;
     CF_TRANSFER_KEY   TransferKey;
-    CORRELATION_VECTOR CorrelationVector; /* opaque 40 bytes */
-    LPVOID            RequestKey;
+    CONST void*       CorrelationVector;
+    CONST void*       SyncStatus;
+    LONGLONG          RequestKey;
 } CF_OPERATION_INFO;
 
 typedef struct CF_OPERATION_PARAMETERS {
@@ -215,6 +262,28 @@ typedef struct CF_OPERATION_PARAMETERS {
             LARGE_INTEGER Offset;
             LARGE_INTEGER Length;
         } TransferData;
+        struct {
+            DWORD         Flags;
+            NTSTATUS      CompletionStatus;
+            LARGE_INTEGER PlaceholderTotalCount;
+            CF_PLACEHOLDER_CREATE_INFO* PlaceholderArray;
+            DWORD         PlaceholderCount;
+            DWORD         EntriesProcessed;
+        } TransferPlaceholders;
+        struct {
+            DWORD         Flags;
+            NTSTATUS      CompletionStatus;
+            LARGE_INTEGER Offset;
+            LARGE_INTEGER Length;
+        } AckData;
+        struct {
+            DWORD    Flags;
+            NTSTATUS CompletionStatus;
+        } AckDelete;
+        struct {
+            DWORD    Flags;
+            NTSTATUS CompletionStatus;
+        } AckRename;
         DWORD RawParams[32];
     };
 } CF_OPERATION_PARAMETERS;
@@ -242,6 +311,74 @@ HRESULT WINAPI CfGetTransferKey(
 VOID WINAPI CfReleaseTransferKey(
     HANDLE           FileHandle,
     CF_TRANSFER_KEY* TransferKey
+);
+
+// ── placeholder query (Explorer context menu / diagnostics) ─────────────
+
+typedef enum CF_PLACEHOLDER_INFO_CLASS {
+    CF_PLACEHOLDER_INFO_BASIC = 0,
+    CF_PLACEHOLDER_INFO_STANDARD = 1,
+} CF_PLACEHOLDER_INFO_CLASS;
+
+typedef enum CF_PIN_STATE {
+    CF_PIN_STATE_UNSPECIFIED = 0,
+    CF_PIN_STATE_PINNED = 1,
+    CF_PIN_STATE_UNPINNED = 2,
+    CF_PIN_STATE_EXCLUDED = 3,
+    CF_PIN_STATE_INHERIT = 4,
+} CF_PIN_STATE;
+
+typedef enum CF_IN_SYNC_STATE {
+    CF_IN_SYNC_STATE_NOT_IN_SYNC = 0,
+    CF_IN_SYNC_STATE_IN_SYNC = 1,
+} CF_IN_SYNC_STATE;
+
+typedef enum CF_SET_INSYNC_FLAGS {
+    CF_SET_INSYNC_FLAG_NONE = 0,
+} CF_SET_INSYNC_FLAGS;
+
+HRESULT WINAPI CfSetInSyncState(
+    HANDLE FileHandle,
+    CF_IN_SYNC_STATE InSyncState,
+    CF_SET_INSYNC_FLAGS InSyncFlags,
+    USN* InoutSyncUsn
+);
+
+#define CFAPI_MAX_FILE_IDENTITY 4096
+
+typedef struct CF_PLACEHOLDER_BASIC_INFO {
+    CF_PIN_STATE PinState;
+    CF_IN_SYNC_STATE InSyncState;
+    LARGE_INTEGER FileId;
+    LARGE_INTEGER SyncRootFileId;
+    ULONG FileIdentityLength;
+    BYTE FileIdentity[CFAPI_MAX_FILE_IDENTITY];
+} CF_PLACEHOLDER_BASIC_INFO;
+
+HRESULT WINAPI CfGetPlaceholderInfo(
+    HANDLE FileHandle,
+    CF_PLACEHOLDER_INFO_CLASS InfoClass,
+    PVOID InfoBuffer,
+    DWORD InfoBufferLength,
+    LPDWORD ReturnedLength
+);
+
+// ── convert regular file to cloud placeholder ───────────────────────────
+
+typedef DWORD CF_CONVERT_FLAGS;
+#define CF_CONVERT_FLAG_NONE                           0x00000000
+#define CF_CONVERT_FLAG_MARK_IN_SYNC                   0x00000001
+#define CF_CONVERT_FLAG_DEHYDRATE                      0x00000002
+#define CF_CONVERT_FLAG_ENABLE_ON_DEMAND_POPULATION    0x00000004
+#define CF_CONVERT_FLAG_ALWAYS_FULL                    0x00000008
+
+HRESULT WINAPI CfConvertToPlaceholder(
+    HANDLE             FileHandle,
+    LPCVOID            FileIdentity,
+    DWORD              FileIdentityLength,
+    CF_CONVERT_FLAGS   ConvertFlags,
+    LONG_PTR*          ConvertUsn,
+    LPOVERLAPPED       Overlapped
 );
 
 #endif /* NEOFS_CFAPI_H */

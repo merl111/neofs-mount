@@ -31,9 +31,14 @@ func New() *Tracker {
 }
 
 // Register adds a new upload and returns the Entry to update progress on.
+// If an entry for path already exists, it is replaced without waiting (callers
+// should serialize same-path uploads to avoid orphaned progress entries).
 func (t *Tracker) Register(path string, totalBytes int64) *Entry {
 	e := &Entry{Path: path, TotalBytes: totalBytes, Started: time.Now()}
 	t.mu.Lock()
+	if _, ok := t.entries[path]; ok {
+		delete(t.entries, path)
+	}
 	t.entries[path] = e
 	t.mu.Unlock()
 	return e

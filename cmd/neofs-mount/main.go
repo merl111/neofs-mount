@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"syscall"
@@ -20,6 +19,7 @@ import (
 )
 
 var version = "dev"
+var buildTime = "unknown"
 
 type appConfig struct {
 	endpoint   string
@@ -40,6 +40,9 @@ type appConfig struct {
 	configPath string
 
 	ignoreContainerIDs []string
+
+	auditLogPath    string
+	auditFromConfig bool
 }
 
 func main() {
@@ -82,7 +85,7 @@ func main() {
 	})
 
 	if cfg.printVersion {
-		fmt.Println(version)
+		fmt.Printf("%s (built %s)\n", version, buildTime)
 		return
 	}
 	if cfg.help {
@@ -90,7 +93,7 @@ func main() {
 		return
 	}
 	if cfg.printInfo {
-		fmt.Printf("neofs-mount %s\n", version)
+		fmt.Printf("neofs-mount %s (built %s)\n", version, buildTime)
 		fmt.Println("Backend: NeoFS object storage")
 		fmt.Println("Mount: FUSE filesystem")
 		fmt.Println("Layout: / lists containers; /<container>/<path> maps to object FilePath prefixes")
@@ -151,15 +154,21 @@ func run(ctx context.Context, log *slog.Logger, cfg appConfig) error {
 	log.Info("starting", "os", runtime.GOOS, "arch", runtime.GOARCH)
 	log.Info("mounting", "mountpoint", mp, "read_only", cfg.readOnly, "cache_dir", cacheDir)
 
+	auditPath := config.DefaultAuditLogPath()
+	if cfg.auditFromConfig {
+		auditPath = cfg.auditLogPath
+	}
+
 	mnt, err := fs.Mount(fs.MountParams{
-		Logger:     log,
-		Endpoint:   cfg.endpoint,
-		WalletKey:  cfg.walletKey,
-		Mountpoint: mp,
-		ReadOnly:   cfg.readOnly,
-		CacheDir:   cacheDir,
-		CacheSize:  cfg.cacheSize,
+		Logger:             log,
+		Endpoint:           cfg.endpoint,
+		WalletKey:          cfg.walletKey,
+		Mountpoint:         mp,
+		ReadOnly:           cfg.readOnly,
+		CacheDir:           cacheDir,
+		CacheSize:          cfg.cacheSize,
 		IgnoreContainerIDs: cfg.ignoreContainerIDs,
+		AuditLogPath:       auditPath,
 	})
 	if err != nil {
 		return err
@@ -238,58 +247,6 @@ func isNotConn(err error) bool {
 	return errors.Is(err, syscall.ENOTCONN)
 }
 
-func tryUnmount(path string) error {
-	// Best-effort: try a normal unmount first.
-	if err := syscall.Unmount(path, 0); err == nil {
-		return nil
-	}
-
-
-	// Fallback: call platform helper (more reliable for FUSE).
-	switch runtime.GOOS {
-	case "linux":
-		if p, err := exec.LookPath("fusermount3"); err == nil {
-			// -u: unmount, -z: lazy unmount (detach).
-			if out, err := exec.Command(p, "-u", "-z", path).CombinedOutput(); err == nil {
-				_ = out
-				return nil
-			} else {
-				return fmt.Errorf("fusermount3 -u -z failed: %w", err)
-			}
-		}
-		if p, err := exec.LookPath("fusermount"); err == nil {
-			if out, err := exec.Command(p, "-u", "-z", path).CombinedOutput(); err == nil {
-				_ = out
-				return nil
-			} else {
-				return fmt.Errorf("fusermount -u -z failed: %w", err)
-			}
-		}
-	case "darwin":
-		if p, err := exec.LookPath("umount"); err == nil {
-			if out, err := exec.Command(p, "-f", path).CombinedOutput(); err == nil {
-				_ = out
-				return nil
-			} else {
-				return fmt.Errorf("umount -f failed: %w", err)
-			}
-		}
-	}
-
-	return fmt.Errorf("unmount failed (no helper available): %s", path)
-}
-
-func staleUnmountHelp(path string) string {
-	switch runtime.GOOS {
-	case "linux":
-		return fmt.Sprintf("Try:\n  fusermount3 -u -z %s\n  # or\n  fusermount -u -z %s", path, path)
-	case "darwin":
-		return fmt.Sprintf("Try:\n  umount -f %s", path)
-	default:
-		return fmt.Sprintf("Try unmounting the path: %s", path)
-	}
-}
-
 func mergeConfig(cfg *appConfig, explicit map[string]bool) error {
 	if cfg == nil {
 		return errors.New("nil config")
@@ -343,6 +300,9 @@ func mergeConfig(cfg *appConfig, explicit map[string]bool) error {
 		cfg.ignoreContainerIDs = fc.IgnoreContainerIDs
 	}
 
+	cfg.auditLogPath = config.ResolveAuditLogPath(fc)
+	cfg.auditFromConfig = true
+
 	return nil
 }
 
@@ -350,4 +310,3 @@ func logErr(err error) {
 	// Avoid introducing ordering dependencies on logger; this is only for config errors.
 	fmt.Fprintf(os.Stderr, "error: %v\n", err)
 }
-

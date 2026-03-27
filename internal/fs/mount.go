@@ -10,6 +10,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
+	"github.com/mathias/neofs-mount/internal/audit"
 	"github.com/mathias/neofs-mount/internal/cache"
 	"github.com/mathias/neofs-mount/internal/neofs"
 	"github.com/mathias/neofs-mount/internal/uploads"
@@ -29,12 +30,26 @@ type MountParams struct {
 
 	IgnoreContainerIDs []string
 	UploadTracker      *uploads.Tracker // optional; enables live upload tracking
+	UploadHistory      *uploads.History
+
+	// AuditLogPath is the append-only JSONL audit file; empty disables.
+	AuditLogPath string
+
+	// FetchDirCacheTTL is how long Windows CfAPI directory listings are reused before
+	// hitting NeoFS again (Windows only). Zero means 5 seconds.
+	FetchDirCacheTTL time.Duration
+
+	// HydrationCacheMaxObjectBytes is the max object size fully written into the disk
+	// cache on first Windows FetchData; larger objects use ranged reads only (Windows only).
+	// Zero means 64 MiB.
+	HydrationCacheMaxObjectBytes int64
 }
 
 type MountedFS struct {
 	log    *slog.Logger
 	server *fuse.Server
 	neo    *neofs.Client
+	audit  *audit.Log
 }
 
 func Mount(p MountParams) (*MountedFS, error) {
@@ -61,6 +76,19 @@ func Mount(p MountParams) (*MountedFS, error) {
 		return nil, err
 	}
 
+	auditLog, aerr := audit.Open(p.AuditLogPath)
+	if aerr != nil {
+		log.Warn("audit log disabled", "path", p.AuditLogPath, "err", aerr)
+		auditLog = nil
+	}
+	if auditLog != nil {
+		auditLog.Record("session_mount", map[string]any{
+			"mountpoint": p.Mountpoint,
+			"backend":    "fuse",
+			"note":       "Moving files out of the mount does not remove NeoFS objects; they remain until replaced by upload or explicitly deleted (unlink).",
+		})
+	}
+
 	root := &rootNode{
 		log:               log,
 		neo:               neo,
@@ -69,6 +97,8 @@ func Mount(p MountParams) (*MountedFS, error) {
 		ro:                p.ReadOnly,
 		ignoreContainers:  makeIgnoreSet(p.IgnoreContainerIDs),
 		uploadTracker:     p.UploadTracker,
+		uploadHistory:     p.UploadHistory,
+		audit:             auditLog,
 	}
 
 	// Use long kernel-level TTLs: NeoFS objects are immutable, so stale dentry/attr
@@ -90,10 +120,13 @@ func Mount(p MountParams) (*MountedFS, error) {
 	server, err := fs.Mount(p.Mountpoint, root, opts)
 	if err != nil {
 		_ = neo.Close()
+		if auditLog != nil {
+			_ = auditLog.Close()
+		}
 		return nil, err
 	}
 
-	return &MountedFS{log: log, server: server, neo: neo}, nil
+	return &MountedFS{log: log, server: server, neo: neo, audit: auditLog}, nil
 }
 
 func (m *MountedFS) Unmount() error {
@@ -113,6 +146,11 @@ func (m *MountedFS) Shutdown(_ context.Context) error {
 	}
 	if m.neo != nil {
 		_ = m.neo.Close()
+	}
+	if m.audit != nil {
+		m.audit.Record("session_unmount", map[string]any{"backend": "fuse"})
+		_ = m.audit.Close()
+		m.audit = nil
 	}
 	return nil
 }
