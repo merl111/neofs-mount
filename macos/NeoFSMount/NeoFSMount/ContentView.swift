@@ -37,10 +37,10 @@ struct ContentView: View {
     private func registerDomain() async {
         status = "Registering…"
         do {
+            // `init(...,pathRelativeToDocumentStorage:)` is unavailable on macOS (iOS File Provider V2).
             let domain = NSFileProviderDomain(
                 identifier: NSFileProviderDomainIdentifier(rawValue: "org.neofs.mount.domain"),
-                displayName: "NeoFS",
-                pathRelativeToDocumentStorage: ""
+                displayName: "NeoFS"
             )
             try await NSFileProviderManager.add(domain)
             status = "Domain registered. Open Finder → NeoFS (or Locations)."
