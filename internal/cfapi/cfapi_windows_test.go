@@ -27,13 +27,23 @@ func (n *noopProvider) FetchPlaceholders(req cfapi.FetchPlaceholdersRequest) err
 func (n *noopProvider) FetchData(req cfapi.FetchDataRequest, sess *cfapi.TransferSession) error {
 	return nil
 }
+func (n *noopProvider) NotifyFileClose(req cfapi.NotifyFileCloseRequest) {}
+func (n *noopProvider) NotifyRenameCompletion(req cfapi.NotifyRenameCompletionRequest) {
+}
+func (n *noopProvider) NotifyDeleteCompletion(req cfapi.NotifyDeleteCompletionRequest) {}
+func (n *noopProvider) ValidateData(req cfapi.ValidateDataRequest, vs *cfapi.ValidateSession) error {
+	if req.RequiredLength < 0 {
+		return nil
+	}
+	return vs.AckRange(req.RequiredOffset, req.RequiredLength, 0)
+}
 
 func connectNoop(root string) (*cfapi.Session, error) {
 	return cfapi.Connect(root, &noopProvider{}, slog.Default())
 }
 
 func createPlaceholders(sess *cfapi.Session, root string, defs []placeholderDef) error {
-	return sess.CreatePlaceholders(root, defs)
+	return sess.CreatePlaceholders(0, 0, root, defs, true)
 }
 
 func splitPathForTest(p string) []string {

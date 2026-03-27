@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,11 +24,16 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/mathias/neofs-mount/internal/config"
+	"github.com/mathias/neofs-mount/internal/explorerpin"
 	"github.com/mathias/neofs-mount/internal/fs"
 	"github.com/mathias/neofs-mount/internal/mountutils"
 	"github.com/mathias/neofs-mount/internal/neofs"
 	"github.com/mathias/neofs-mount/internal/uploads"
 )
+
+// version and buildTime are injected by release builds via -ldflags (see Makefile).
+var version = "dev"
+var buildTime = "unknown"
 
 // ---------------------------------------------------------------------------
 // Global state
@@ -38,6 +44,7 @@ var (
 	mountContext  context.Context
 	mountCancel   context.CancelFunc
 	uploadTracker = uploads.New()
+	uploadHistory = uploads.NewHistory(config.DefaultUploadHistoryPath(), 0)
 
 	// live stats displayed in the dashboard
 	statsMu      sync.RWMutex
@@ -45,11 +52,46 @@ var (
 	statsN3Addr  string = "…"
 )
 
+// Uploads tab: refreshed by uploadsRefreshLoop; avoids fragile widget tree walks.
+var (
+	uploadsActiveVBox      *fyne.Container
+	uploadsHistoryList     *widget.List
+	uploadsHistorySnapshot []uploads.HistoryItem
+)
+
+// applyExplorerSidebarPin updates the Windows Explorer nav pane entry using the tray PNG as an .ico on disk.
+func applyExplorerSidebarPin(cfg *config.FileConfig) {
+	if runtime.GOOS != "windows" || cfg == nil {
+		return
+	}
+	show := true
+	if cfg.ShowInExplorer != nil {
+		show = *cfg.ShowInExplorer
+	}
+	if !show {
+		_ = explorerpin.Unregister()
+		return
+	}
+	if cfg.Mountpoint == nil || *cfg.Mountpoint == "" {
+		_ = explorerpin.Unregister()
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	_ = explorerpin.Register("NeoFS Mount", *cfg.Mountpoint, exe, resourceLogoPng.StaticContent)
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
 func main() {
+	if done, code := tryNeoFSAttrsMode(); done {
+		os.Exit(code)
+	}
+
 	a := app.NewWithID("org.neofs.mount")
 
 	desk, ok := a.(desktop.App)
@@ -109,7 +151,7 @@ func main() {
 			}
 
 			var mntErr error
-			activeMount, mntErr = fs.Mount(fs.MountParams{
+			mp := fs.MountParams{
 				Logger:             log,
 				Endpoint:           *cfg.Endpoint,
 				WalletKey:          *cfg.WalletKey,
@@ -119,11 +161,22 @@ func main() {
 				CacheSize:          cacheSize,
 				IgnoreContainerIDs: cfg.IgnoreContainerIDs,
 				UploadTracker:      uploadTracker,
-			})
+				UploadHistory:      uploadHistory,
+				AuditLogPath:       config.ResolveAuditLogPath(cfg),
+			}
+			if cfg.FetchDirCacheSeconds != nil && *cfg.FetchDirCacheSeconds > 0 {
+				mp.FetchDirCacheTTL = time.Duration(*cfg.FetchDirCacheSeconds) * time.Second
+			}
+			if cfg.HydrationCacheMaxObjectMB != nil && *cfg.HydrationCacheMaxObjectMB > 0 {
+				mp.HydrationCacheMaxObjectBytes = *cfg.HydrationCacheMaxObjectMB << 20
+			}
+			activeMount, mntErr = fs.Mount(mp)
 			if mntErr != nil {
 				showError(a, mntErr)
 				return
 			}
+
+			applyExplorerSidebarPin(cfg)
 
 			mountContext, mountCancel = context.WithCancel(context.Background())
 			mountItem.Label = "Unmount"
@@ -180,19 +233,28 @@ func main() {
 	)
 	desk.SetSystemTrayMenu(menu)
 
-	go updateBalance(desk, balanceItem, menu)
-
-	// Auto-mount by default if config is valid and has required fields.
-	cfg, cfgErr := config.Load(config.DefaultConfigPath())
-	if cfgErr == nil {
-		autoMount := true
-		if cfg.AutoMount != nil {
-			autoMount = *cfg.AutoMount
+	// Run as soon as the event loop is live so the splash can paint immediately
+	// (Show() before Run() would stay blank until a.Run()).
+	a.Lifecycle().SetOnStarted(func() {
+		showStartupSplash(a)
+		if runtime.GOOS == "windows" {
+			if exe, err := os.Executable(); err == nil {
+				explorerpin.RegisterNeoFSContextMenuVerbs(exe)
+			}
 		}
-		if autoMount && cfg.Endpoint != nil && cfg.WalletKey != nil && cfg.Mountpoint != nil {
-			go toggleMount()
+		go updateBalance(desk, balanceItem, menu)
+		cfg, cfgErr := config.Load(config.DefaultConfigPath())
+		if cfgErr == nil {
+			applyExplorerSidebarPin(cfg)
+			autoMount := true
+			if cfg.AutoMount != nil {
+				autoMount = *cfg.AutoMount
+			}
+			if autoMount && cfg.Endpoint != nil && cfg.WalletKey != nil && cfg.Mountpoint != nil {
+				go toggleMount()
+			}
 		}
-	}
+	})
 
 	a.Run()
 }
@@ -286,7 +348,7 @@ func openMainWindow(a fyne.App, desk desktop.App, toggleMount func()) {
 	w.Show()
 
 	// Start refresh loops for dynamic pages.
-	go uploadsRefreshLoop(uploadsPage, w)
+	go uploadsRefreshLoop(w)
 	go dashRefreshLoop(dashPage, w)
 }
 
@@ -374,53 +436,92 @@ func dashRefreshLoop(page fyne.CanvasObject, w fyne.Window) {
 // Uploads page
 // ---------------------------------------------------------------------------
 
-var uploadsContent *container.AppTabs // reused in loop
-
-func buildUploadsPage() fyne.CanvasObject {
-	uploadsContent = container.NewAppTabs() // placeholder; rebuilt in loop
-	uploadsContent.Hide()
-
-	emptyLabel := widget.NewLabel("No active uploads.")
-	emptyLabel.Alignment = fyne.TextAlignCenter
-
-	box := container.NewVBox(emptyLabel)
-	return container.NewPadded(box)
+func formatByteSize(b int64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.2f GB", float64(b)/float64(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.2f MB", float64(b)/float64(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.2f KB", float64(b)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
 }
 
-func uploadsRefreshLoop(page fyne.CanvasObject, w fyne.Window) {
+func formatUploadHistoryRow(it uploads.HistoryItem) string {
+	ts := it.FinishedAt.Local().Format("2006-01-02 15:04:05")
+	st := strings.ToUpper(it.Status)
+	key := it.NeoKey
+	if len(key) > 64 {
+		key = "…" + key[len(key)-61:]
+	}
+	s := fmt.Sprintf("%s  %s  %s", ts, st, key)
+	if it.Bytes > 0 {
+		s += "  (" + formatByteSize(it.Bytes) + ")"
+	}
+	if it.Status != "ok" && it.Detail != "" {
+		d := it.Detail
+		if len(d) > 80 {
+			d = d[:77] + "…"
+		}
+		s += " — " + d
+	}
+	return s
+}
+
+func buildUploadsPage() fyne.CanvasObject {
+	uploadsActiveVBox = container.NewVBox()
+	activeScroll := container.NewVScroll(uploadsActiveVBox)
+
+	uploadsHistoryList = widget.NewList(
+		func() int { return len(uploadsHistorySnapshot) },
+		func() fyne.CanvasObject {
+			l := widget.NewLabel("")
+			l.Wrapping = fyne.TextWrapWord
+			l.TextStyle = fyne.TextStyle{Monospace: true}
+			return l
+		},
+		func(id widget.ListItemID, o fyne.CanvasObject) {
+			l := o.(*widget.Label)
+			i := int(id)
+			if i < 0 || i >= len(uploadsHistorySnapshot) {
+				l.SetText("")
+				return
+			}
+			l.SetText(formatUploadHistoryRow(uploadsHistorySnapshot[i]))
+		},
+	)
+	uploadsHistoryList.HideSeparators = true
+	historyScroll := container.NewVScroll(uploadsHistoryList)
+
+	tabs := container.NewAppTabs(
+		container.NewTabItem("Active", activeScroll),
+		container.NewTabItem("History", historyScroll),
+	)
+	return container.NewPadded(tabs)
+}
+
+func uploadsRefreshLoop(w fyne.Window) {
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
-
-	formatBytes := func(b int64) string {
-		switch {
-		case b >= 1<<30:
-			return fmt.Sprintf("%.2f GB", float64(b)/float64(1<<30))
-		case b >= 1<<20:
-			return fmt.Sprintf("%.2f MB", float64(b)/float64(1<<20))
-		case b >= 1<<10:
-			return fmt.Sprintf("%.2f KB", float64(b)/float64(1<<10))
-		default:
-			return fmt.Sprintf("%d B", b)
-		}
-	}
 
 	for {
 		<-tick.C
 		fyne.Do(func() {
-			padded, ok := page.(*fyne.Container)
-			if !ok {
+			uploadsHistorySnapshot = uploadHistory.List()
+			if uploadsHistoryList != nil {
+				uploadsHistoryList.Refresh()
+			}
+			if uploadsActiveVBox == nil {
 				return
 			}
-			box, ok := padded.Objects[0].(*fyne.Container)
-			if !ok {
-				return
-			}
-			box.Objects = nil
+			uploadsActiveVBox.Objects = nil
 			entries := uploadTracker.List()
 			if len(entries) == 0 {
 				lbl := widget.NewLabel("No active uploads.")
 				lbl.Alignment = fyne.TextAlignCenter
-				box.Add(lbl)
+				uploadsActiveVBox.Add(lbl)
 			} else {
 				for _, e := range entries {
 					e := e
@@ -434,12 +535,12 @@ func uploadsRefreshLoop(page fyne.CanvasObject, w fyne.Window) {
 					bar := widget.NewProgressBar()
 					bar.SetValue(pct)
 					lbl := widget.NewLabel(fmt.Sprintf("%s  •  %s / %s  •  %s elapsed",
-						filepath.Base(e.Path), formatBytes(sent), formatBytes(total), elapsed))
+						filepath.Base(e.Path), formatByteSize(sent), formatByteSize(total), elapsed))
 					lbl.TextStyle = fyne.TextStyle{Monospace: true}
-					box.Add(container.NewVBox(lbl, bar))
+					uploadsActiveVBox.Add(container.NewVBox(lbl, bar))
 				}
 			}
-			box.Refresh()
+			uploadsActiveVBox.Refresh()
 		})
 	}
 }
@@ -497,6 +598,44 @@ func buildSettingsPage(a fyne.App, w fyne.Window, desk desktop.App) fyne.CanvasO
 		runAtLoginCheck.SetChecked(true)
 	}
 
+	var showInExplorerCheck *widget.Check
+	if runtime.GOOS == "windows" {
+		showInExplorerCheck = widget.NewCheck("Show mount in Explorer under This PC", nil)
+		sie := true
+		if cfg.ShowInExplorer != nil {
+			sie = *cfg.ShowInExplorer
+		}
+		showInExplorerCheck.SetChecked(sie)
+	}
+
+	auditEnabledCheck := widget.NewCheck("Record NeoFS operations to audit log (JSON lines)", nil)
+	if cfg.AuditLog != nil && !*cfg.AuditLog {
+		auditEnabledCheck.SetChecked(false)
+	} else {
+		auditEnabledCheck.SetChecked(true)
+	}
+	auditPathEntry := widget.NewEntry()
+	auditPathEntry.SetText(strVal(cfg.AuditLogPath))
+	auditPathEntry.SetPlaceHolder("Default: same folder as neofs-mount.log")
+	auditEffectiveLabel := widget.NewLabel("")
+	updateAuditEffective := func() {
+		var fc config.FileConfig
+		al := auditEnabledCheck.Checked
+		fc.AuditLog = &al
+		if p := strings.TrimSpace(auditPathEntry.Text); p != "" {
+			fc.AuditLogPath = &p
+		}
+		ep := config.ResolveAuditLogPath(&fc)
+		if ep == "" {
+			auditEffectiveLabel.SetText("Effective audit file: (disabled)")
+		} else {
+			auditEffectiveLabel.SetText("Effective audit file: " + ep)
+		}
+	}
+	auditEnabledCheck.OnChanged = func(bool) { updateAuditEffective() }
+	auditPathEntry.OnChanged = func(string) { updateAuditEffective() }
+	updateAuditEffective()
+
 	networkSelect := widget.NewSelect([]string{"mainnet", "testnet"}, nil)
 	if cfg.Network != nil && *cfg.Network == "testnet" {
 		networkSelect.SetSelected("testnet")
@@ -514,19 +653,39 @@ func buildSettingsPage(a fyne.App, w fyne.Window, desk desktop.App) fyne.CanvasO
 		logLevelSelect.SetSelected("info")
 	}
 
-	form := widget.NewForm(
-		&widget.FormItem{Text: "Network", Widget: networkSelect},
-		&widget.FormItem{Text: "Endpoint", Widget: endpointEntry, HintText: "e.g. s03.neofs.devenv:8080"},
-		&widget.FormItem{Text: "Wallet Key", Widget: walletKeyEntry, HintText: "WIF string or path to .key file"},
-		&widget.FormItem{Text: "Override RPC", Widget: rpcEntry, HintText: "Leave blank for defaults"},
-		&widget.FormItem{Text: "Mountpoint", Widget: mountpointEntry, HintText: "Directory to mount NeoFS on"},
-		&widget.FormItem{Text: "Cache Dir", Widget: cacheDirEntry, HintText: "Local path for temporary uploads"},
-		&widget.FormItem{Text: "Cache Size", Widget: cacheSizeEntry, HintText: "Max cache size in bytes"},
-		&widget.FormItem{Text: "Log Level", Widget: logLevelSelect},
-		&widget.FormItem{Text: "Read Only", Widget: readOnlyCheck},
-		&widget.FormItem{Text: "Auto Mount", Widget: autoMountCheck},
-		&widget.FormItem{Text: "Run at Login", Widget: runAtLoginCheck},
+	formItems := []*widget.FormItem{
+		{Text: "Network", Widget: networkSelect},
+		{Text: "Endpoint", Widget: endpointEntry, HintText: "e.g. s03.neofs.devenv:8080"},
+		{Text: "Wallet Key", Widget: walletKeyEntry, HintText: "WIF string or path to .key file"},
+		{Text: "Override RPC", Widget: rpcEntry, HintText: "Leave blank for defaults"},
+		{Text: "Mountpoint", Widget: mountpointEntry, HintText: "Directory to mount NeoFS on"},
+		{Text: "Cache Dir", Widget: cacheDirEntry, HintText: "Local path for temporary uploads"},
+		{Text: "Cache Size", Widget: cacheSizeEntry, HintText: "Max cache size in bytes"},
+		{Text: "Log Level", Widget: logLevelSelect},
+		{Text: "Read Only", Widget: readOnlyCheck},
+		{Text: "Auto Mount", Widget: autoMountCheck},
+		{Text: "Run at Login", Widget: runAtLoginCheck},
+	}
+	if showInExplorerCheck != nil {
+		formItems = append(formItems, &widget.FormItem{
+			Text:     "Explorer",
+			Widget:   showInExplorerCheck,
+			HintText: "Uses the same image as the tray icon (saved as explorer-tray.ico under AppData).",
+		})
+	}
+	formItems = append(formItems,
+		&widget.FormItem{
+			Text:     "Audit log",
+			Widget:   auditEnabledCheck,
+			HintText: "Append-only JSON lines of uploads, deletes, and other NeoFS operations.",
+		},
+		&widget.FormItem{
+			Text:     "Audit file",
+			Widget:   auditPathEntry,
+			HintText: "Leave blank for default. Changing the path applies after remount.",
+		},
 	)
+	form := widget.NewForm(formItems...)
 
 	saveBtn := widget.NewButtonWithIcon("Save Settings", theme.DocumentSaveIcon(), func() {
 		ep := endpointEntry.Text
@@ -567,6 +726,10 @@ func buildSettingsPage(a fyne.App, w fyne.Window, desk desktop.App) fyne.CanvasO
 		cfg.AutoMount = &am
 		ral := runAtLoginCheck.Checked
 		cfg.RunAtLogin = &ral
+		if showInExplorerCheck != nil {
+			sie := showInExplorerCheck.Checked
+			cfg.ShowInExplorer = &sie
+		}
 		nw := networkSelect.Selected
 		cfg.Network = &nw
 		rpcE := rpcEntry.Text
@@ -576,12 +739,22 @@ func buildSettingsPage(a fyne.App, w fyne.Window, desk desktop.App) fyne.CanvasO
 			cfg.RPCEndpoint = nil
 		}
 
+		al := auditEnabledCheck.Checked
+		cfg.AuditLog = &al
+		ap := strings.TrimSpace(auditPathEntry.Text)
+		if ap != "" {
+			cfg.AuditLogPath = &ap
+		} else {
+			cfg.AuditLogPath = nil
+		}
+
 		if err := toggleRunAtLogin(ral); err != nil {
 			dialog.ShowError(fmt.Errorf("Failed to configure OS startup: %w", err), w)
 		}
 		if err := config.Save(cfgPath, cfg); err != nil {
 			dialog.ShowError(err, w)
 		} else {
+			applyExplorerSidebarPin(cfg)
 			dialog.ShowInformation("Saved", "Configuration saved.", w)
 		}
 	})
@@ -592,14 +765,22 @@ func buildSettingsPage(a fyne.App, w fyne.Window, desk desktop.App) fyne.CanvasO
 			dialog.ShowError(fmt.Errorf("Failed to open log directory: %w", err), w)
 		}
 	})
+	viewAuditBtn := widget.NewButtonWithIcon("View audit log", theme.DocumentIcon(), func() {
+		showAuditLogWindow(a, w)
+	})
+
+	buildInfoLabel := widget.NewLabel(fmt.Sprintf("Version: %s  |  Built: %s", version, buildTime))
+	buildInfoLabel.TextStyle = fyne.TextStyle{Italic: true}
 
 	scroll := container.NewVScroll(container.NewVBox(
 		widget.NewLabelWithStyle("Settings", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		buildInfoLabel,
 		widget.NewSeparator(),
 		form,
+		auditEffectiveLabel,
 		container.NewPadded(saveBtn),
 		widget.NewSeparator(),
-		container.NewHBox(openLogsBtn),
+		container.NewHBox(openLogsBtn, viewAuditBtn),
 	))
 	return scroll
 }

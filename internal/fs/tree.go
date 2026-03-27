@@ -24,6 +24,7 @@ import (
 	cid "github.com/nspcc-dev/neofs-sdk-go/container/id"
 	oid "github.com/nspcc-dev/neofs-sdk-go/object/id"
 
+	"github.com/mathias/neofs-mount/internal/audit"
 	"github.com/mathias/neofs-mount/internal/cache"
 	"github.com/mathias/neofs-mount/internal/neofs"
 	"github.com/mathias/neofs-mount/internal/uploads"
@@ -37,8 +38,10 @@ type rootNode struct {
 	cache        *cache.Cache
 	dirCache     *dirCache
 	ro           bool
-	epoch        uint64
+	epoch         uint64
 	uploadTracker *uploads.Tracker
+	uploadHistory *uploads.History
+	audit         *audit.Log
 
 	mu            sync.Mutex
 	containerByUI map[string]cid.ID
@@ -182,6 +185,8 @@ found:
 		cnr:           cnr,
 		path:          "",
 		uploadTracker: n.uploadTracker,
+		uploadHistory: n.uploadHistory,
+		audit:         n.audit,
 	}
 
 	out.Attr.Mode = fuse.S_IFDIR | 0o555
@@ -244,8 +249,10 @@ type containerNode struct {
 	dirCache     *dirCache
 	ro           bool
 	cnr          cid.ID
-	path         string
+	path          string
 	uploadTracker *uploads.Tracker
+	uploadHistory *uploads.History
+	audit         *audit.Log
 }
 
 func (n *containerNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
@@ -331,13 +338,16 @@ func (n *containerNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 			n.log.Debug("lookup dir", "container", n.cnr.EncodeToString(), "name", name)
 		}
 		child := &containerNode{
-			log:      n.log,
-			neo:      n.neo,
-			cache:    n.cache,
-			dirCache: n.dirCache,
-			ro:       n.ro,
-			cnr:      n.cnr,
-			path:     prefix,
+			log:           n.log,
+			neo:           n.neo,
+			cache:         n.cache,
+			dirCache:      n.dirCache,
+			ro:            n.ro,
+			cnr:           n.cnr,
+			path:          prefix,
+			uploadTracker: n.uploadTracker,
+			uploadHistory: n.uploadHistory,
+			audit:         n.audit,
 		}
 		out.Attr.Mode = fuse.S_IFDIR | 0o555
 		if !n.ro {
@@ -397,15 +407,18 @@ func (n *containerNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 		out.SetAttrTimeout(5 * time.Minute)
 
 		child := &fileNode{
-			log:      n.log,
-			neo:      n.neo,
-			cache:    n.cache,
-			ro:       n.ro,
-			cnr:      n.cnr,
-			obj:      foundFile,
-			relPath:  prefix,
-			fileSize: size,
-			fileTime: fileTime,
+			log:           n.log,
+			neo:           n.neo,
+			cache:         n.cache,
+			ro:            n.ro,
+			cnr:           n.cnr,
+			obj:           foundFile,
+			relPath:       prefix,
+			fileSize:      size,
+			fileTime:      fileTime,
+			uploadTracker: n.uploadTracker,
+			uploadHistory: n.uploadHistory,
+			audit:         n.audit,
 		}
 		st := fs.StableAttr{Mode: fuse.S_IFREG}
 		return n.NewInode(ctx, child, st), 0
@@ -457,6 +470,12 @@ func (n *containerNode) Rename(ctx context.Context, name string, newParent fs.In
 	if dstIDs, err := n.findObjectsByExactPath(ctx, dstRel); err == nil {
 		for _, id := range dstIDs {
 			_ = n.neo.ObjectDelete(ctx, n.cnr, id)
+			if n.audit != nil {
+				n.audit.Record("object_deleted", map[string]any{
+					"source": "fuse_rename_overwrite", "container_id": n.cnr.EncodeToString(),
+					"object_path": filepath.ToSlash(dstRel), "object_id": id.EncodeToString(),
+				})
+			}
 		}
 	}
 
@@ -477,12 +496,25 @@ func (n *containerNode) Rename(ctx context.Context, name string, newParent fs.In
 			// Copy succeeded but delete failed: surface error.
 			return errno(delErr)
 		}
+		if n.audit != nil {
+			n.audit.Record("object_deleted", map[string]any{
+				"source": "fuse_rename_source", "container_id": n.cnr.EncodeToString(),
+				"object_path": filepath.ToSlash(srcRel), "object_id": srcID.EncodeToString(),
+			})
+		}
 	}
 
 	if n.dirCache != nil {
 		n.dirCache.InvalidateContainer(n.cnr.EncodeToString())
 	}
 	n.neo.InvalidateContainerScan(n.cnr)
+	if n.audit != nil {
+		n.audit.Record("fuse_rename", map[string]any{
+			"container_id": n.cnr.EncodeToString(),
+			"src_path":     filepath.ToSlash(srcRel),
+			"dst_path":     filepath.ToSlash(dstRel),
+		})
+	}
 	return 0
 }
 
@@ -510,14 +542,17 @@ func (n *containerNode) Create(ctx context.Context, name string, flags uint32, m
 	}
 
 	fn := &fileNode{
-		log:      n.log,
-		neo:      n.neo,
-		cache:    n.cache,
-		ro:       n.ro,
-		cnr:      n.cnr,
-		obj:      oid.ID{}, // set on upload
-		relPath:  relPath,
-		fileSize: 0,
+		log:           n.log,
+		neo:           n.neo,
+		cache:         n.cache,
+		ro:            n.ro,
+		cnr:           n.cnr,
+		obj:           oid.ID{}, // set on upload
+		relPath:       relPath,
+		fileSize:      0,
+		uploadTracker: n.uploadTracker,
+		uploadHistory: n.uploadHistory,
+		audit:         n.audit,
 	}
 	st := fs.StableAttr{Mode: fuse.S_IFREG}
 	in := n.NewInode(ctx, fn, st)
@@ -528,6 +563,8 @@ func (n *containerNode) Create(ctx context.Context, name string, flags uint32, m
 		cache:         n.cache,
 		dirCache:      n.dirCache,
 		uploadTracker: n.uploadTracker,
+		uploadHistory: n.uploadHistory,
+		audit:         n.audit,
 		node:          fn,
 		tmpPath:       f.Name(),
 		f:             f,
@@ -563,12 +600,24 @@ func (n *containerNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		if err := n.neo.ObjectDelete(ctx, n.cnr, id); err != nil {
 			return errno(err)
 		}
+		if n.audit != nil {
+			n.audit.Record("object_deleted", map[string]any{
+				"source": "fuse_unlink", "container_id": n.cnr.EncodeToString(),
+				"object_path": filepath.ToSlash(relPath), "object_id": id.EncodeToString(),
+			})
+		}
 	}
 
 	if n.dirCache != nil {
 		n.dirCache.InvalidateContainer(n.cnr.EncodeToString())
 	}
 	n.neo.InvalidateContainerScan(n.cnr)
+	if n.audit != nil {
+		n.audit.Record("fuse_unlink", map[string]any{
+			"container_id": n.cnr.EncodeToString(), "object_path": filepath.ToSlash(relPath),
+			"deleted_count": len(ids),
+		})
+	}
 	return 0
 }
 
@@ -600,6 +649,13 @@ func (n *containerNode) Mkdir(ctx context.Context, name string, mode uint32, out
 	if n.log != nil {
 		n.log.Info("created directory", "path", relPath, "obj", newID.EncodeToString())
 	}
+	if n.audit != nil {
+		n.audit.Record("fuse_mkdir_object", map[string]any{
+			"container_id": n.cnr.EncodeToString(),
+			"object_path":  filepath.ToSlash(relPath),
+			"object_id":    newID.EncodeToString(),
+		})
+	}
 
 	if n.dirCache != nil {
 		n.dirCache.InvalidateContainer(n.cnr.EncodeToString())
@@ -607,13 +663,16 @@ func (n *containerNode) Mkdir(ctx context.Context, name string, mode uint32, out
 	n.neo.InvalidateContainerScan(n.cnr)
 
 	child := &containerNode{
-		log:      n.log,
-		neo:      n.neo,
-		cache:    n.cache,
-		dirCache: n.dirCache,
-		ro:       n.ro,
-		cnr:      n.cnr,
-		path:     relPath,
+		log:           n.log,
+		neo:           n.neo,
+		cache:         n.cache,
+		dirCache:      n.dirCache,
+		ro:            n.ro,
+		cnr:           n.cnr,
+		path:          relPath,
+		uploadTracker: n.uploadTracker,
+		uploadHistory: n.uploadHistory,
+		audit:         n.audit,
 	}
 
 	out.Attr.Mode = fuse.S_IFDIR | 0o555
@@ -754,10 +813,14 @@ func (n *containerNode) listChildren(ctx context.Context) ([]fuse.DirEntry, sysc
 type fileNode struct {
 	fs.Inode
 
-	log *slog.Logger
-	neo *neofs.Client
+	log   *slog.Logger
+	neo   *neofs.Client
 	cache *cache.Cache
-	ro  bool
+	ro    bool
+	audit *audit.Log
+
+	uploadTracker *uploads.Tracker
+	uploadHistory *uploads.History
 
 	cnr cid.ID
 	obj oid.ID
@@ -972,14 +1035,18 @@ func (n *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 		}
 
 		h := &uploadFileHandle{
-			log:     n.log,
-			neo:     n.neo,
-			cache:   n.cache,
-			node:    n,
-			tmpPath: f.Name(),
-			f:       f,
-			cnr:     n.cnr,
-			relPath: n.relPath,
+			log:           n.log,
+			neo:           n.neo,
+			cache:         n.cache,
+			dirCache:      nil,
+			uploadTracker: n.uploadTracker,
+			uploadHistory: n.uploadHistory,
+			audit:         n.audit,
+			node:          n,
+			tmpPath:       f.Name(),
+			f:             f,
+			cnr:           n.cnr,
+			relPath:       n.relPath,
 		}
 		return h, 0, 0
 	}
@@ -1104,12 +1171,14 @@ func (h *streamingFileHandle) Release(ctx context.Context) syscall.Errno {
 
 
 type uploadFileHandle struct {
-	log          *slog.Logger
-	neo          *neofs.Client
-	cache        *cache.Cache
-	dirCache     *dirCache
+	log           *slog.Logger
+	neo           *neofs.Client
+	cache         *cache.Cache
+	dirCache      *dirCache
 	uploadTracker *uploads.Tracker
-	node         *fileNode
+	uploadHistory *uploads.History
+	audit         *audit.Log
+	node          *fileNode
 
 	tmpPath string
 	f       *os.File
@@ -1170,6 +1239,8 @@ func (h *uploadFileHandle) Release(ctx context.Context) syscall.Errno {
 	node := h.node
 	dirCache := h.dirCache
 	uploadTracker := h.uploadTracker
+	uploadHistory := h.uploadHistory
+	neoKey := cnr.EncodeToString() + "/" + filepath.ToSlash(relPath)
 
 	go func() {
 		start := time.Now()
@@ -1182,6 +1253,7 @@ func (h *uploadFileHandle) Release(ctx context.Context) syscall.Errno {
 			h.log.Info("[upload] starting", "path", relPath, "bytes", fileBytes)
 		}
 
+		uploadStarted := time.Now()
 		// Register with tracker (if available).
 		var trackerEntry *uploads.Entry
 		if uploadTracker != nil {
@@ -1201,6 +1273,23 @@ func (h *uploadFileHandle) Release(ctx context.Context) syscall.Errno {
 		if err != nil {
 			if h.log != nil {
 				h.log.Error("[upload] FAILED", "path", relPath, "err", err, "elapsed", time.Since(start).Round(time.Millisecond))
+			}
+			if h.audit != nil {
+				h.audit.Record("object_put_failed", map[string]any{
+					"source": "fuse_release", "stage": "open_temp", "container_id": cnr.EncodeToString(),
+					"object_path": filepath.ToSlash(relPath), "error": err.Error(),
+				})
+			}
+			if uploadHistory != nil {
+				now := time.Now()
+				uploadHistory.Append(uploads.HistoryItem{
+					StartedAt:  now,
+					FinishedAt: now,
+					NeoKey:     neoKey,
+					Bytes:      fileBytes,
+					Status:     "failed",
+					Detail:     "open temp: " + err.Error(),
+				})
 			}
 			return
 		}
@@ -1240,11 +1329,32 @@ func (h *uploadFileHandle) Release(ctx context.Context) syscall.Errno {
 			if h.log != nil {
 				h.log.Error("[upload] FAILED", "path", relPath, "bytes", fileBytes, "err", putErr, "elapsed", time.Since(start).Round(time.Millisecond))
 			}
+			if h.audit != nil {
+				h.audit.Record("object_put_failed", map[string]any{
+					"source": "fuse_release", "stage": "object_put", "container_id": cnr.EncodeToString(),
+					"object_path": filepath.ToSlash(relPath), "bytes": fileBytes, "error": putErr.Error(),
+				})
+			}
+			if uploadHistory != nil {
+				uploadHistory.Append(uploads.HistoryItem{
+					StartedAt:  uploadStarted,
+					FinishedAt: time.Now(),
+					NeoKey:     neoKey,
+					Bytes:      fileBytes,
+					Status:     "failed",
+					Detail:     putErr.Error(),
+				})
+			}
 			return
 		}
 
+		var deleted []string
 		for _, id := range oldIDs {
+			if id == newID {
+				continue
+			}
 			_ = neo.ObjectDelete(ctxBg, cnr, id)
+			deleted = append(deleted, id.EncodeToString())
 		}
 
 		key := cache.Key(cnr.EncodeToString(), newID.EncodeToString())
@@ -1262,6 +1372,22 @@ func (h *uploadFileHandle) Release(ctx context.Context) syscall.Errno {
 
 		if h.log != nil {
 			h.log.Info("[upload] ok", "path", relPath, "obj", newID.EncodeToString(), "bytes", fileBytes, "elapsed", time.Since(start).Round(time.Millisecond))
+		}
+		if h.audit != nil {
+			h.audit.Record("object_put_completed", map[string]any{
+				"source": "fuse_release", "container_id": cnr.EncodeToString(),
+				"object_path": filepath.ToSlash(relPath), "new_object_id": newID.EncodeToString(),
+				"deleted_object_ids": deleted, "bytes": fileBytes,
+			})
+		}
+		if uploadHistory != nil {
+			uploadHistory.Append(uploads.HistoryItem{
+				StartedAt:  uploadStarted,
+				FinishedAt: time.Now(),
+				NeoKey:     neoKey,
+				Bytes:      fileBytes,
+				Status:     "ok",
+			})
 		}
 	}()
 

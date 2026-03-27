@@ -42,14 +42,21 @@ The library we need is `cldapi.lib`. After installation it lives at:
 C:\Program Files (x86)\Windows Kits\10\Lib\<version>\um\x64\cldapi.lib
 ```
 
-Tell the CGo linker where to find it by adding the SDK lib path to your environment:
+Tell the CGo linker where to find it — the path contains spaces, which breaks GCC.
+Create a junction to a space-free alias once:
 
 ```powershell
 $sdkVer = (Get-Item "C:\Program Files (x86)\Windows Kits\10\Lib\*" | Sort-Object Name | Select-Object -Last 1).Name
-$env:CGO_LDFLAGS = "-L`"C:\Program Files (x86)\Windows Kits\10\Lib\$sdkVer\um\x64`""
+New-Item -ItemType Directory -Force C:\WinSDK\um
+cmd /c mklink /J C:\WinSDK\um\x64 "C:\Program Files (x86)\Windows Kits\10\Lib\$sdkVer\um\x64"
 ```
 
-Or add it permanently via System Properties → Environment Variables.
+Then set the CGo linker flag to the junction path (no spaces):
+
+```powershell
+$env:CGO_LDFLAGS_ALLOW = ".*"
+$env:CGO_LDFLAGS = "-LC:\WinSDK\um\x64"
+```
 
 ---
 
@@ -65,19 +72,29 @@ git checkout win   # the Windows CfApi branch
 
 ## Build
 
+From the repo root on a Windows machine (with `gcc` / TDM-GCC on `PATH`):
+
+```powershell
+make build-windows
+```
+
+Outputs: `.\bin\neofs-mount-tray.exe` and `.\bin\neofs-mount.exe`.
+
+**Important:** Do **not** build the tray with a plain `go build` from the IDE. MinGW CGO + default debug output produces a PE that often fails with **“This app can’t run on your PC”**. The Makefile sets `CGO_CFLAGS=-O2 -g0` and Go `-s -w` to avoid that.
+
+If you cannot use `make`, copy the exact `go build` lines and environment variables from the `build-windows` target in the **Makefile** (same as below).
+
 ```powershell
 $env:CGO_ENABLED = "1"
 $env:GOOS        = "windows"
 $env:GOARCH      = "amd64"
+$env:CGO_CFLAGS  = "-O2 -g0 -fno-asynchronous-unwind-tables"
+$env:CGO_LDFLAGS_ALLOW = ".*"
+$env:CGO_LDFLAGS = "-LC:\WinSDK\um\x64"   # junction set up above
 
-# Tray application (the main GUI)
-go build -o bin\neofs-mount-tray.exe .\cmd\neofs-mount-tray
-
-# Headless daemon (optional)
-go build -o bin\neofs-mount.exe .\cmd\neofs-mount
+go build -trimpath -ldflags="-s -w -X main.version=dev -H windowsgui" -o bin\neofs-mount-tray.exe .\cmd\neofs-mount-tray
+go build -trimpath -ldflags="-s -w -X main.version=dev" -o bin\neofs-mount.exe .\cmd\neofs-mount
 ```
-
-Both binaries end up in `.\bin\`.
 
 > **Tip**: If CGo can't find `cldapi.lib`, double-check `CGO_LDFLAGS` and that TDM-GCC is on your `PATH`.
 
