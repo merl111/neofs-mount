@@ -203,6 +203,9 @@ func (p *neofsProvider) maybeUploadPathFromWatcher(path string) {
 	if isRecycleBinPath(path) {
 		return
 	}
+	if isEphemeralEditorHiddenName(filepath.Base(path)) {
+		return
+	}
 	// Same as uploadClosedFile: re-creates after delete must upload; wasRecentDelete is for restore suppression only.
 	path = filepath.Clean(path)
 	st, err := os.Stat(path)
@@ -215,6 +218,9 @@ func (p *neofsProvider) maybeUploadPathFromWatcher(path string) {
 				return nil
 			}
 			if isRecycleBinPath(subPath) {
+				return nil
+			}
+			if isEphemeralEditorHiddenName(filepath.Base(subPath)) {
 				return nil
 			}
 			containerIDStr, neoRel, ok := p.mountDiskToNeo(subPath)

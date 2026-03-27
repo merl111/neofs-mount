@@ -1,7 +1,12 @@
-# Binaries
+# Binaries and release outputs
 /bin/
 /dist/
 /fyne-cross/
+
+# Stray local builds (e.g. go build -o in repo root)
+/neofs-mount
+/neofs-mount-tray
+/linuxdeploy*.AppImage
 
 # IDEs and Tools
 .idea/
@@ -15,3 +20,7 @@
 
 # Fyne dependencies
 Icon.png
+
+# Windows PE resources: copied from win/pe-rsrc/ only for GOOS=windows builds (COFF .syso breaks Linux/cross links).
+cmd/neofs-mount-tray/rsrc.syso
+cmd/neofs-mount/rsrc.syso

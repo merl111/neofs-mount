@@ -1218,6 +1218,14 @@ func (p *neofsProvider) uploadClosedFile(ctx context.Context, diskPath string) e
 		})
 		return fmt.Errorf("%w: path not under mount", errUploadClosedSkipped)
 	}
+	if isEphemeralEditorHiddenName(filepath.Base(filepath.ToSlash(neoRelPath))) {
+		p.auditRecord("object_put_skipped", map[string]any{
+			"source": "cfapi_close_or_watcher", "reason": "ephemeral_editor_temp",
+			"disk_path": diskPath, "container_id": containerIDStr,
+			"object_path": filepath.ToSlash(neoRelPath),
+		})
+		return fmt.Errorf("%w: ephemeral editor temp", errUploadClosedSkipped)
+	}
 
 	defer func() {
 		if r := recover(); r != nil {

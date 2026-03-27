@@ -237,8 +237,9 @@ func main() {
 	// (Show() before Run() would stay blank until a.Run()).
 	a.Lifecycle().SetOnStarted(func() {
 		showStartupSplash(a)
-		if runtime.GOOS == "windows" {
-			if exe, err := os.Executable(); err == nil {
+		if exe, err := os.Executable(); err == nil {
+			switch runtime.GOOS {
+			case "windows", "linux":
 				explorerpin.RegisterNeoFSContextMenuVerbs(exe)
 			}
 		}

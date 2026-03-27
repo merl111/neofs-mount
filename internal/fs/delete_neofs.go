@@ -1,5 +1,3 @@
-//go:build windows
-
 package fs
 
 import (
@@ -33,8 +31,7 @@ func IgnoreSetFromIDs(ids []string) map[string]struct{} {
 	return m
 }
 
-// DeleteNeoFSAtMountPath removes all NeoFS objects whose FilePath/Key matches neoRelPath or lives under it
-// (prefix). absTarget must be under mountRoot; container folder names are resolved with uiNameToCID.
+// DeleteNeoFSAtMountPath removes all NeoFS objects whose FilePath/Key matches neoRelPath or lives under it (prefix).
 func DeleteNeoFSAtMountPath(ctx context.Context, neo *neofs.Client, mountRoot, absTarget string, ignore map[string]struct{}) (deleted int, cnrStr, neoRel string, err error) {
 	_, alias, err := ListContainersForUI(ctx, neo, ignore)
 	if err != nil {
