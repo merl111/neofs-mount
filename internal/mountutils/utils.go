@@ -1,15 +1,12 @@
 package mountutils
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
-	"syscall"
 )
 
 func NewLogger(level string) *slog.Logger {
@@ -30,11 +27,21 @@ func NewLogger(level string) *slog.Logger {
 	logFile := LogFilePath()
 	var w io.Writer = os.Stderr
 	if f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666); err == nil {
-		w = io.MultiWriter(os.Stderr, f)
+		w = io.MultiWriter(f, &bestEffortWriter{os.Stderr})
 	}
 
 	h := slog.NewTextHandler(w, &slog.HandlerOptions{Level: lvl})
 	return slog.New(h)
+}
+
+// bestEffortWriter wraps an io.Writer and swallows errors so that
+// io.MultiWriter does not short-circuit when the underlying writer
+// is unavailable (e.g. os.Stderr in a Windows GUI-subsystem app).
+type bestEffortWriter struct{ w io.Writer }
+
+func (b *bestEffortWriter) Write(p []byte) (int, error) {
+	n, _ := b.w.Write(p)
+	return n, nil
 }
 
 // LogFilePath returns the OS-specific path for the neofs-mount log file.
@@ -54,16 +61,9 @@ func LogFilePath() string {
 }
 
 // OpenLogDirectory opens the directory containing the log file in the OS file manager.
+// Platform-specific implementations are in utils_windows.go and utils_unix.go.
 func OpenLogDirectory() error {
-	logFile := LogFilePath()
-	dir := filepath.Dir(logFile)
-	var cmd *exec.Cmd
-	if runtime.GOOS == "darwin" {
-		cmd = exec.Command("open", dir)
-	} else {
-		cmd = exec.Command("xdg-open", dir)
-	}
-	return cmd.Start()
+	return openLogDirectory()
 }
 
 func EnsureDir(path string, perm os.FileMode) error {
@@ -74,10 +74,10 @@ func EnsureDir(path string, perm os.FileMode) error {
 		}
 		return fmt.Errorf("path exists but is not a directory: %s", path)
 	}
-	// If a previous FUSE mount crashed, Linux can return ENOTCONN here.
-	// Try to unmount and re-check.
-	if IsNotConn(err) {
-		unmErr := TryUnmount(path)
+	// If a previous FUSE mount crashed, Linux/macOS can return ENOTCONN here.
+	// Try to unmount and re-check (no-op on Windows).
+	if isNotConn(err) {
+		unmErr := tryUnmount(path)
 		if st2, err2 := os.Stat(path); err2 == nil && st2.IsDir() {
 			return nil
 		}
@@ -101,61 +101,4 @@ func EnsureDir(path string, perm os.FileMode) error {
 	return nil
 }
 
-func IsNotConn(err error) bool {
-	var pe *os.PathError
-	if errors.As(err, &pe) {
-		return errors.Is(pe.Err, syscall.ENOTCONN)
-	}
-	return errors.Is(err, syscall.ENOTCONN)
-}
 
-func TryUnmount(path string) error {
-	// Best-effort: try a normal unmount first.
-	if err := syscall.Unmount(path, 0); err == nil {
-		return nil
-	}
-
-
-	// Fallback: call platform helper (more reliable for FUSE).
-	switch runtime.GOOS {
-	case "linux":
-		if p, err := exec.LookPath("fusermount3"); err == nil {
-			if out, err := exec.Command(p, "-u", "-z", path).CombinedOutput(); err == nil {
-				_ = out
-				return nil
-			} else {
-				return fmt.Errorf("fusermount3 -u -z failed: %w", err)
-			}
-		}
-		if p, err := exec.LookPath("fusermount"); err == nil {
-			if out, err := exec.Command(p, "-u", "-z", path).CombinedOutput(); err == nil {
-				_ = out
-				return nil
-			} else {
-				return fmt.Errorf("fusermount -u -z failed: %w", err)
-			}
-		}
-	case "darwin":
-		if p, err := exec.LookPath("umount"); err == nil {
-			if out, err := exec.Command(p, "-f", path).CombinedOutput(); err == nil {
-				_ = out
-				return nil
-			} else {
-				return fmt.Errorf("umount -f failed: %w", err)
-			}
-		}
-	}
-
-	return fmt.Errorf("unmount failed (no helper available): %s", path)
-}
-
-func staleUnmountHelp(path string) string {
-	switch runtime.GOOS {
-	case "linux":
-		return fmt.Sprintf("Try:\n  fusermount3 -u -z %s\n  # or\n  fusermount -u -z %s", path, path)
-	case "darwin":
-		return fmt.Sprintf("Try:\n  umount -f %s", path)
-	default:
-		return fmt.Sprintf("Try unmounting the path: %s", path)
-	}
-}

@@ -4,11 +4,13 @@ go 1.25
 
 require (
 	fyne.io/fyne/v2 v2.7.3
+	github.com/Kodeworks/golang-image-ico v0.0.0-20141118225523-73f0f4cfade9
 	github.com/google/uuid v1.6.0
 	github.com/hanwen/go-fuse/v2 v2.9.0
 	github.com/nspcc-dev/neo-go v0.118.0
 	github.com/nspcc-dev/neofs-sdk-go v1.0.0-rc.17
 	github.com/pelletier/go-toml/v2 v2.3.0
+	golang.org/x/sys v0.41.0
 )
 
 require (
@@ -67,7 +69,6 @@ require (
 	golang.org/x/exp v0.0.0-20250911091902-df9299821621 // indirect
 	golang.org/x/image v0.24.0 // indirect
 	golang.org/x/net v0.50.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250922171735-9219d122eba9 // indirect
 	google.golang.org/grpc v1.75.1 // indirect
