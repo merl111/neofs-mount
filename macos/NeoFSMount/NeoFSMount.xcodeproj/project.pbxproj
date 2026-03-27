@@ -294,6 +294,7 @@
 					"-framework",
 					FileProvider,
 					"-lpthread",
+					"-lresolv",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = org.neofs.mount;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -333,6 +334,7 @@
 					"-framework",
 					FileProvider,
 					"-lpthread",
+					"-lresolv",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = org.neofs.mount;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -370,6 +372,7 @@
 					"-framework",
 					FileProvider,
 					"-lpthread",
+					"-lresolv",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = org.neofs.mount.FileProvider;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -409,6 +412,7 @@
 					"-framework",
 					FileProvider,
 					"-lpthread",
+					"-lresolv",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = org.neofs.mount.FileProvider;
 				PRODUCT_NAME = "$(TARGET_NAME)";
