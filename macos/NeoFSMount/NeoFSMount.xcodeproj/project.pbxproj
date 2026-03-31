@@ -7,11 +7,23 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		75F8376A2F7B11880081E6FD /* FileProvider.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 75F837692F7B11880081E6FD /* FileProvider.framework */; };
 		B10000000000000000000001 /* NeoFSMountApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000001 /* NeoFSMountApp.swift */; };
-		B10000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000002 /* ContentView.swift */; };
 		B10000000000000000000003 /* FileProviderExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000003 /* FileProviderExtension.swift */; };
 		B10000000000000000000004 /* NeoFSMountFileProvider.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = F10000000000000000000020 /* NeoFSMountFileProvider.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		B10000000000000000000005 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000050 /* Assets.xcassets */; };
+		B10000000000000000000006 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000051 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		T10000000000000000000004 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = P10000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = T10000000000000000000003;
+			remoteInfo = NeoFSMountFileProvider;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
 		C10000000000000000000001 /* Embed Foundation Extensions */ = {
@@ -28,16 +40,18 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		75F837692F7B11880081E6FD /* FileProvider.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = FileProvider.framework; path = System/Library/PrivateFrameworks/FileProvider.framework; sourceTree = SDKROOT; };
 		F10000000000000000000001 /* NeoFSMountApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeoFSMountApp.swift; sourceTree = "<group>"; };
-		F10000000000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		F10000000000000000000003 /* FileProviderExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderExtension.swift; sourceTree = "<group>"; };
-		F10000000000000000000010 /* NeoFSMount.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NeoFSMount.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F10000000000000000000010 /* NeoFS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NeoFS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F10000000000000000000020 /* NeoFSMountFileProvider.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NeoFSMountFileProvider.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		F10000000000000000000030 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		F10000000000000000000031 /* NeoFSMount.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = NeoFSMount.entitlements; sourceTree = "<group>"; };
 		F10000000000000000000032 /* FileProviderExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = FileProviderExtension.entitlements; sourceTree = "<group>"; };
 		F10000000000000000000040 /* neofs_fp_api.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = neofs_fp_api.h; sourceTree = "<group>"; };
 		F10000000000000000000041 /* NeoFSMount-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "NeoFSMount-Bridging-Header.h"; sourceTree = "<group>"; };
+		F10000000000000000000050 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		F10000000000000000000051 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -52,18 +66,28 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				75F8376A2F7B11880081E6FD /* FileProvider.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		75F837682F7B11880081E6FD /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				75F837692F7B11880081E6FD /* FileProvider.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		G10000000000000000000001 = {
 			isa = PBXGroup;
 			children = (
 				G10000000000000000000002 /* NeoFSMount */,
 				G10000000000000000000003 /* FileProviderExtension */,
 				G10000000000000000000004 /* Shared */,
+				75F837682F7B11880081E6FD /* Frameworks */,
 				G10000000000000000000005 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -72,7 +96,7 @@
 			isa = PBXGroup;
 			children = (
 				F10000000000000000000001 /* NeoFSMountApp.swift */,
-				F10000000000000000000002 /* ContentView.swift */,
+				F10000000000000000000050 /* Assets.xcassets */,
 				F10000000000000000000031 /* NeoFSMount.entitlements */,
 			);
 			path = NeoFSMount;
@@ -82,6 +106,7 @@
 			isa = PBXGroup;
 			children = (
 				F10000000000000000000003 /* FileProviderExtension.swift */,
+				F10000000000000000000051 /* Assets.xcassets */,
 				F10000000000000000000030 /* Info.plist */,
 				F10000000000000000000032 /* FileProviderExtension.entitlements */,
 			);
@@ -100,7 +125,7 @@
 		G10000000000000000000005 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				F10000000000000000000010 /* NeoFSMount.app */,
+				F10000000000000000000010 /* NeoFS.app */,
 				F10000000000000000000020 /* NeoFSMountFileProvider.appex */,
 			);
 			name = Products;
@@ -116,6 +141,7 @@
 				S10000000000000000000001 /* Build Go static library */,
 				SRC0000000000000000000001 /* Sources */,
 				FW00000000000000000000001 /* Frameworks */,
+				RES0000000000000000000001 /* Resources */,
 				C10000000000000000000001 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
@@ -125,7 +151,7 @@
 			);
 			name = NeoFSMount;
 			productName = NeoFSMount;
-			productReference = F10000000000000000000010 /* NeoFSMount.app */;
+			productReference = F10000000000000000000010 /* NeoFS.app */;
 			productType = "com.apple.product-type.application";
 		};
 		T10000000000000000000003 /* NeoFSMountFileProvider */ = {
@@ -135,6 +161,7 @@
 				S10000000000000000000002 /* Build Go static library */,
 				SRC0000000000000000000002 /* Sources */,
 				FW00000000000000000000002 /* Frameworks */,
+				RES0000000000000000000002 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -185,6 +212,7 @@
 /* Begin PBXShellScriptBuildPhase section */
 		S10000000000000000000001 /* Build Go static library */ = {
 			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = (
 			);
@@ -201,10 +229,11 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -euo pipefail\nexport PATH=\"/usr/local/go/bin:/opt/homebrew/bin:${PATH}\"\nGDIR=\"${SRCROOT}/../GoBridge\"\nOUT=\"${DERIVED_FILE_DIR}/libneofsfp\"\ncase \" ${ARCHS} \" in\n  *\" x86_64 \"*) GOARCH=amd64 ;;\n  *) GOARCH=arm64 ;;\nesac\nexport CGO_ENABLED=1\nexport GOOS=darwin\nexport GOARCH\ncd \"${GDIR}\"\ngo build -buildmode=c-archive -trimpath -o \"${OUT}.a\" .\n";
+			shellScript = "set -euo pipefail\nexport PATH=\"/usr/local/go/bin:/opt/homebrew/bin:${PATH}\"\nGDIR=\"${SRCROOT}/../GoBridge\"\nOUT=\"${DERIVED_FILE_DIR}/libneofsfp\"\nexport CGO_ENABLED=1\nexport GOOS=darwin\ncd \"${GDIR}\"\n# Universal Release builds pass ARCHS=\"arm64 x86_64\"; picking one GOARCH was wrong (x86_64 matched first).\nGOARCH=arm64 go build -buildmode=c-archive -trimpath -o \"${OUT}_arm64.a\" .\nGOARCH=amd64 go build -buildmode=c-archive -trimpath -o \"${OUT}_amd64.a\" .\nlipo -create \"${OUT}_arm64.a\" \"${OUT}_amd64.a\" -output \"${OUT}.a\"\ncp \"${OUT}_arm64.h\" \"${OUT}.h\"\nrm -f \"${OUT}_arm64.a\" \"${OUT}_amd64.a\" \"${OUT}_arm64.h\" \"${OUT}_amd64.h\"\n";
 		};
 		S10000000000000000000002 /* Build Go static library */ = {
 			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = (
 			);
@@ -221,9 +250,28 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -euo pipefail\nexport PATH=\"/usr/local/go/bin:/opt/homebrew/bin:${PATH}\"\nGDIR=\"${SRCROOT}/../GoBridge\"\nOUT=\"${DERIVED_FILE_DIR}/libneofsfp\"\ncase \" ${ARCHS} \" in\n  *\" x86_64 \"*) GOARCH=amd64 ;;\n  *) GOARCH=arm64 ;;\nesac\nexport CGO_ENABLED=1\nexport GOOS=darwin\nexport GOARCH\ncd \"${GDIR}\"\ngo build -buildmode=c-archive -trimpath -o \"${OUT}.a\" .\n";
+			shellScript = "set -euo pipefail\nexport PATH=\"/usr/local/go/bin:/opt/homebrew/bin:${PATH}\"\nGDIR=\"${SRCROOT}/../GoBridge\"\nOUT=\"${DERIVED_FILE_DIR}/libneofsfp\"\nexport CGO_ENABLED=1\nexport GOOS=darwin\ncd \"${GDIR}\"\n# Universal Release builds pass ARCHS=\"arm64 x86_64\"; picking one GOARCH was wrong (x86_64 matched first).\nGOARCH=arm64 go build -buildmode=c-archive -trimpath -o \"${OUT}_arm64.a\" .\nGOARCH=amd64 go build -buildmode=c-archive -trimpath -o \"${OUT}_amd64.a\" .\nlipo -create \"${OUT}_arm64.a\" \"${OUT}_amd64.a\" -output \"${OUT}.a\"\ncp \"${OUT}_arm64.h\" \"${OUT}.h\"\nrm -f \"${OUT}_arm64.a\" \"${OUT}_amd64.a\" \"${OUT}_arm64.h\" \"${OUT}_amd64.h\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXResourcesBuildPhase section */
+		RES0000000000000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000005 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		RES0000000000000000000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000006 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		SRC0000000000000000000001 /* Sources */ = {
@@ -231,7 +279,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				B10000000000000000000001 /* NeoFSMountApp.swift in Sources */,
-				B10000000000000000000002 /* ContentView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -253,34 +300,28 @@
 		};
 /* End PBXTargetDependency section */
 
-/* Begin PBXContainerItemProxy section */
-		T10000000000000000000004 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = P10000000000000000000001 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = T10000000000000000000003;
-			remoteInfo = NeoFSMountFileProvider;
-		};
-/* End PBXContainerItemProxy section */
-
 /* Begin XCBuildConfiguration section */
 		XC20000000000000000000001 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = NeoFSMount/NeoFSMount.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 8QM8476KKM;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(SRCROOT)/Shared",
 					"$(DERIVED_FILE_DIR)",
 				);
-				INFOPLIST_KEY_CFBundleDisplayName = "NeoFS Mount";
+				INFOPLIST_KEY_CFBundleDisplayName = NeoFS;
+				INFOPLIST_KEY_CFBundleName = NeoFS;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -297,7 +338,7 @@
 					"-lresolv",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = org.neofs.mount;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = NeoFS;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "Shared/NeoFSMount-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
@@ -308,19 +349,23 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = NeoFSMount/NeoFSMount.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 8QM8476KKM;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(SRCROOT)/Shared",
 					"$(DERIVED_FILE_DIR)",
 				);
-				INFOPLIST_KEY_CFBundleDisplayName = "NeoFS Mount";
+				INFOPLIST_KEY_CFBundleDisplayName = NeoFS;
+				INFOPLIST_KEY_CFBundleName = NeoFS;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -337,7 +382,7 @@
 					"-lresolv",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = org.neofs.mount;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = NeoFS;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "Shared/NeoFSMount-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
@@ -348,16 +393,17 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = FileProviderExtension/FileProviderExtension.entitlements;
-				CODE_SIGN_STYLE = Automatic;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 8QM8476KKM;
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(SRCROOT)/Shared",
 					"$(DERIVED_FILE_DIR)",
 				);
 				INFOPLIST_FILE = FileProviderExtension/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "NeoFS File Provider";
+				INFOPLIST_KEY_CFBundleDisplayName = NeoFS;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -375,12 +421,17 @@
 					"-lresolv",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = org.neofs.mount.FileProvider;
-				PRODUCT_NAME = "$(TARGET_NAME)";
 				PRODUCT_MODULE_NAME = NeoFSMountFileProvider;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "NeoFS FP Dev";
 				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "Shared/NeoFSMount-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
+				SYSTEM_FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SDKROOT)$(SYSTEM_LIBRARY_DIR)/PrivateFrameworks",
+				);
 			};
 			name = Debug;
 		};
@@ -388,16 +439,17 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = FileProviderExtension/FileProviderExtension.entitlements;
-				CODE_SIGN_STYLE = Automatic;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 8QM8476KKM;
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(SRCROOT)/Shared",
 					"$(DERIVED_FILE_DIR)",
 				);
 				INFOPLIST_FILE = FileProviderExtension/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "NeoFS File Provider";
+				INFOPLIST_KEY_CFBundleDisplayName = NeoFS;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -415,12 +467,17 @@
 					"-lresolv",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = org.neofs.mount.FileProvider;
-				PRODUCT_NAME = "$(TARGET_NAME)";
 				PRODUCT_MODULE_NAME = NeoFSMountFileProvider;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "NeoFS FP Dev";
 				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "Shared/NeoFSMount-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
+				SYSTEM_FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SDKROOT)$(SYSTEM_LIBRARY_DIR)/PrivateFrameworks",
+				);
 			};
 			name = Release;
 		};

@@ -44,30 +44,30 @@ func runNeoFSDeleteFromContainer(targetPath string) int {
 	cfgPath := config.DefaultConfigPath()
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		winMessageBox("NeoFS Mount", fmt.Sprintf("Could not load config:\n%v", err), mbOk|mbIconWarning)
+		winMessageBox("NeoFS", fmt.Sprintf("Could not load config:\n%v", err), mbOk|mbIconWarning)
 		return 1
 	}
 	if cfg.Mountpoint == nil || *cfg.Mountpoint == "" {
-		winMessageBox("NeoFS Mount", "Mountpoint is not set in config.", mbOk|mbIconWarning)
+		winMessageBox("NeoFS", "Mountpoint is not set in config.", mbOk|mbIconWarning)
 		return 1
 	}
 	if cfg.Endpoint == nil || cfg.WalletKey == nil {
-		winMessageBox("NeoFS Mount", "Endpoint or wallet key missing in config.", mbOk|mbIconWarning)
+		winMessageBox("NeoFS", "Endpoint or wallet key missing in config.", mbOk|mbIconWarning)
 		return 1
 	}
 
 	absTarget, err := filepath.Abs(targetPath)
 	if err != nil {
-		winMessageBox("NeoFS Mount", err.Error(), mbOk|mbIconWarning)
+		winMessageBox("NeoFS", err.Error(), mbOk|mbIconWarning)
 		return 1
 	}
 	absMount, err := filepath.Abs(*cfg.Mountpoint)
 	if err != nil {
-		winMessageBox("NeoFS Mount", err.Error(), mbOk|mbIconWarning)
+		winMessageBox("NeoFS", err.Error(), mbOk|mbIconWarning)
 		return 1
 	}
 	if !pathHasPrefixFold(absTarget, absMount) {
-		winMessageBox("NeoFS Mount", fmt.Sprintf("Not under NeoFS mount:\n%s", absTarget), mbOk|mbIconWarning)
+		winMessageBox("NeoFS", fmt.Sprintf("Not under NeoFS mount:\n%s", absTarget), mbOk|mbIconWarning)
 		return 1
 	}
 
@@ -84,7 +84,7 @@ func runNeoFSDeleteFromContainer(targetPath string) int {
 		WalletKey: *cfg.WalletKey,
 	})
 	if err != nil {
-		winMessageBox("NeoFS Mount", fmt.Sprintf("NeoFS connection failed:\n%v", err), mbOk|mbIconWarning)
+		winMessageBox("NeoFS", fmt.Sprintf("NeoFS connection failed:\n%v", err), mbOk|mbIconWarning)
 		return 1
 	}
 	defer neo.Close()
@@ -92,17 +92,17 @@ func runNeoFSDeleteFromContainer(targetPath string) int {
 	ignore := fs.IgnoreSetFromIDs(cfg.IgnoreContainerIDs)
 	n, cnrStr, neoRel, err := fs.DeleteNeoFSAtMountPath(ctx, neo, absMount, absTarget, ignore)
 	if err != nil {
-		winMessageBox("NeoFS Mount", fmt.Sprintf("Delete failed:\n%v", err), mbOk|mbIconWarning)
+		winMessageBox("NeoFS", fmt.Sprintf("Delete failed:\n%v", err), mbOk|mbIconWarning)
 		return 1
 	}
 
 	_ = os.RemoveAll(absTarget)
 
 	if n == 0 {
-		winMessageBox("NeoFS Mount", fmt.Sprintf("No NeoFS objects matched this path.\n\nContainer: %s\nPath: %s\n\nLocal item was removed if it still existed.", cnrStr, neoRel), mbOk|mbIconInfo)
+		winMessageBox("NeoFS", fmt.Sprintf("No NeoFS objects matched this path.\n\nContainer: %s\nPath: %s\n\nLocal item was removed if it still existed.", cnrStr, neoRel), mbOk|mbIconInfo)
 		return 0
 	}
 
-	winMessageBox("NeoFS Mount", fmt.Sprintf("Deleted %d NeoFS object(s).\n\nContainer: %s\nPath: %s", n, cnrStr, neoRel), mbOk|mbIconInfo)
+	winMessageBox("NeoFS", fmt.Sprintf("Deleted %d NeoFS object(s).\n\nContainer: %s\nPath: %s", n, cnrStr, neoRel), mbOk|mbIconInfo)
 	return 0
 }
