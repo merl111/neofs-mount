@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>NeoFS File Provider</string>
+	<string>NeoFS</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -22,8 +22,10 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>NSExtension</key>
 	<dict>
+		<key>NSExtensionFileProviderSupportsEnumeration</key>
+		<true/>
 		<key>NSExtensionPointIdentifier</key>
-		<string>com.apple.fileprovider-non-local</string>
+		<string>com.apple.fileprovider-nonui</string>
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).FileProviderExtension</string>
 		<key>NSFileProviderDocumentGroup</key>

@@ -80,7 +80,7 @@ func applyExplorerSidebarPin(cfg *config.FileConfig) {
 	if err != nil {
 		return
 	}
-	_ = explorerpin.Register("NeoFS Mount", *cfg.Mountpoint, exe, resourceLogoPng.StaticContent)
+	_ = explorerpin.Register("NeoFS", *cfg.Mountpoint, exe, resourceLogoPng.StaticContent)
 }
 
 // ---------------------------------------------------------------------------
@@ -265,7 +265,7 @@ func main() {
 // ---------------------------------------------------------------------------
 
 func openMainWindow(a fyne.App, desk desktop.App, toggleMount func()) {
-	w := a.NewWindow("neoFS Mount")
+	w := a.NewWindow("NeoFS")
 	w.SetIcon(resourceLogoPng) // Shows up in the taskbar/dock
 	w.Resize(fyne.NewSize(800, 750))
 
@@ -315,7 +315,7 @@ func openMainWindow(a fyne.App, desk desktop.App, toggleMount func()) {
 	logoImg := canvas.NewImageFromResource(resourceLogoPng)
 	logoImg.FillMode = canvas.ImageFillContain
 	logoImg.SetMinSize(fyne.NewSize(64, 64))
-	titleLabel := widget.NewLabelWithStyle("neoFS Mount", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	titleLabel := widget.NewLabelWithStyle("NeoFS", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	header := container.NewVBox(
 		container.NewPadded(logoImg),
 		titleLabel,
@@ -862,6 +862,15 @@ func updateBalance(desk desktop.App, item *fyne.MenuItem, menu *fyne.Menu) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
+	refreshMenu := func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Fyne systray can panic on menu reset if channels are closed during teardown.
+			}
+		}()
+		desk.SetSystemTrayMenu(menu)
+	}
+
 	update := func() {
 		cfg, err := config.Load(config.DefaultConfigPath())
 		if err != nil || cfg.Endpoint == nil || cfg.WalletKey == nil {
@@ -870,7 +879,7 @@ func updateBalance(desk desktop.App, item *fyne.MenuItem, menu *fyne.Menu) {
 			statsN3Addr = "Not configured"
 			statsMu.Unlock()
 			item.Label = "Balance: —"
-			desk.SetSystemTrayMenu(menu)
+			refreshMenu()
 			return
 		}
 
@@ -890,7 +899,7 @@ func updateBalance(desk desktop.App, item *fyne.MenuItem, menu *fyne.Menu) {
 			statsBalance = "Error"
 			statsMu.Unlock()
 			item.Label = "Balance: Error"
-			desk.SetSystemTrayMenu(menu)
+			refreshMenu()
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -911,9 +920,11 @@ func updateBalance(desk desktop.App, item *fyne.MenuItem, menu *fyne.Menu) {
 			statsMu.Unlock()
 			item.Label = "Balance: " + label
 		}
-		desk.SetSystemTrayMenu(menu)
+		refreshMenu()
 	}
 
+	// Give the systray time to fully initialize before the first menu refresh.
+	time.Sleep(2 * time.Second)
 	update()
 	for range ticker.C {
 		update()

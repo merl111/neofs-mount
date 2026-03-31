@@ -24,25 +24,25 @@ func runNeoFSDeleteFromContainer(targetPath string) int {
 	cfgPath := config.DefaultConfigPath()
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		return runDeleteMessageScreen("NeoFS Mount", fmt.Sprintf("Could not load config:\n%v", err), 1)
+		return runDeleteMessageScreen("NeoFS", fmt.Sprintf("Could not load config:\n%v", err), 1)
 	}
 	if cfg.Mountpoint == nil || *cfg.Mountpoint == "" {
-		return runDeleteMessageScreen("NeoFS Mount", "Mountpoint is not set in config.", 1)
+		return runDeleteMessageScreen("NeoFS", "Mountpoint is not set in config.", 1)
 	}
 	if cfg.Endpoint == nil || cfg.WalletKey == nil {
-		return runDeleteMessageScreen("NeoFS Mount", "Endpoint or wallet key missing in config.", 1)
+		return runDeleteMessageScreen("NeoFS", "Endpoint or wallet key missing in config.", 1)
 	}
 
 	absTarget, err := filepath.Abs(targetPath)
 	if err != nil {
-		return runDeleteMessageScreen("NeoFS Mount", err.Error(), 1)
+		return runDeleteMessageScreen("NeoFS", err.Error(), 1)
 	}
 	absMount, err := filepath.Abs(*cfg.Mountpoint)
 	if err != nil {
-		return runDeleteMessageScreen("NeoFS Mount", err.Error(), 1)
+		return runDeleteMessageScreen("NeoFS", err.Error(), 1)
 	}
 	if !pathHasPrefixFold(absTarget, absMount) {
-		return runDeleteMessageScreen("NeoFS Mount", fmt.Sprintf("Not under NeoFS mount:\n%s", absTarget), 1)
+		return runDeleteMessageScreen("NeoFS", fmt.Sprintf("Not under NeoFS mount:\n%s", absTarget), 1)
 	}
 
 	msg := fmt.Sprintf("Permanently remove all NeoFS objects at this path from the container?\n\n%s\n\nThis cannot be undone.", absTarget)

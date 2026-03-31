@@ -18,6 +18,7 @@
 
 # Xcode (macOS File Provider sources)
 macos/**/*.xcuserdata/
+macos/**/project.xcworkspace/
 
 # IDEs and Tools
 .idea/
@@ -35,6 +36,9 @@ Icon.png
 # Test artifacts
 /tmp/
 *.test
+
+# Vendored apps / large external checkouts
+/desktop/
 
 # Windows PE resources: copied from win/pe-rsrc/ only for GOOS=windows builds (COFF .syso breaks Linux/cross links).
 cmd/neofs-mount-tray/rsrc.syso

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -93,6 +94,9 @@ func ResolveAuditLogPath(fc *FileConfig) string {
 }
 
 func Load(path string) (*FileConfig, error) {
+	if _, err := EnsureDefault(path); err != nil {
+		return nil, err
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -129,4 +133,70 @@ func Save(path string, fc *FileConfig) error {
 		return err
 	}
 	return os.WriteFile(path, b, 0644)
+}
+
+// DefaultConfigTemplate is a starter config written on first run when no config exists.
+// It intentionally includes placeholders so the user can fill values via the tray UI.
+const DefaultConfigTemplate = `# neoFS-mount config (auto-created)
+#
+# Default location:
+#   Linux:  $XDG_CONFIG_HOME/neofs-mount/config.toml (or $HOME/.config/neofs-mount/config.toml)
+#   macOS:  $HOME/Library/Application Support/neofs-mount/config.toml
+#   Windows: %APPDATA%\neofs-mount\config.toml
+
+# NeoFS endpoint, e.g. "s03.neofs.devenv:8080"
+endpoint = ""
+
+# Either a path to a file containing WIF, or a raw WIF string directly.
+wallet_key = ""
+
+# Linux-only (FUSE) directory mountpoint. On macOS the default integration is File Provider (Finder).
+mountpoint = "/tmp/neofs"
+
+read_only = false
+auto_mount = true
+run_at_login = false
+
+# Optional cache settings (used for reads and to stage writes before upload).
+cache_dir = ""
+cache_size = 1073741824 # 1GiB
+
+# Log level: debug|info|warn|error
+log_level = "info"
+
+ignore_container_ids = []
+`
+
+// EnsureDefault creates a starter config file if it doesn't already exist.
+// It returns created=true when it successfully created a new file.
+func EnsureDefault(path string) (created bool, err error) {
+	if path == "" {
+		return false, errors.New("empty config path")
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		return false, nil
+	} else if !os.IsNotExist(statErr) {
+		return false, statErr
+	}
+
+	dir := filepath.Dir(path)
+	if mkErr := os.MkdirAll(dir, 0755); mkErr != nil {
+		return false, mkErr
+	}
+
+	// Create atomically; don't clobber if another process wins the race.
+	f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if openErr != nil {
+		if os.IsExist(openErr) {
+			return false, nil
+		}
+		return false, openErr
+	}
+	defer f.Close()
+
+	if _, werr := f.WriteString(DefaultConfigTemplate); werr != nil {
+		_ = os.Remove(path)
+		return false, werr
+	}
+	return true, nil
 }

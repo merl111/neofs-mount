@@ -49,7 +49,7 @@ func runUnregisterSyncRoot(pathArg string) int {
 		return 1
 	}
 	fmt.Fprintf(os.Stdout, "\nSuccess. The folder is no longer a Cloud Sync root.\n")
-	fmt.Fprintf(os.Stdout, "Next: delete or recreate %s if you want a clean directory, then start NeoFS Mount and mount again.\n", root)
+	fmt.Fprintf(os.Stdout, "Next: delete or recreate %s if you want a clean directory, then start NeoFS and mount again.\n", root)
 	return 0
 }
 

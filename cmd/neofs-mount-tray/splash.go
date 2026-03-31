@@ -41,7 +41,7 @@ func showStartupSplash(a fyne.App) {
 	logo.FillMode = canvas.ImageFillContain
 	logo.SetMinSize(fyne.NewSize(112, 112))
 
-	title := canvas.NewText("NeoFS Mount", color.NRGBA{R: 0xf2, G: 0xf4, B: 0xf8, A: 0xff})
+	title := canvas.NewText("NeoFS", color.NRGBA{R: 0xf2, G: 0xf4, B: 0xf8, A: 0xff})
 	title.TextSize = 22
 	title.TextStyle = fyne.TextStyle{Bold: true}
 
