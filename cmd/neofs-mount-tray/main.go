@@ -358,11 +358,11 @@ func openMainWindow(a fyne.App, desk desktop.App, toggleMount func()) {
 // ---------------------------------------------------------------------------
 
 type dashWidgets struct {
-	mountStatus  *widget.Label
-	gasBalance   *widget.Label
-	n3Addr       *widget.Label
-	mountpoint   *widget.Label
-	mountBtn     *widget.Button
+	mountStatus *widget.Label
+	gasBalance  *widget.Label
+	n3Addr      *widget.Label
+	mountpoint  *widget.Label
+	mountBtn    *widget.Button
 }
 
 var dash dashWidgets

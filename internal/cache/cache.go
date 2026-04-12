@@ -77,43 +77,45 @@ func (c *Cache) GetOrFetch(ctx context.Context, key string, fetch func(ctx conte
 		return "", 0, errors.New("cache: empty key")
 	}
 
-	// Fast path: hit.
-	c.mu.Lock()
-	if e, ok := c.entries[key]; ok && !e.fetching && e.lastErr == nil {
-		path := e.path
-		size := e.size
-		e.atime = time.Now()
+	for {
+		c.mu.Lock()
+		if e, ok := c.entries[key]; ok && !e.fetching && e.lastErr == nil {
+			path := e.path
+			size := e.size
+			e.atime = time.Now()
+			c.bumpLRU(key)
+			c.mu.Unlock()
+			if st, err := os.Stat(path); err == nil && st.Size() == size {
+				return path, size, nil
+			}
+			c.mu.Lock()
+			if e2, ok2 := c.entries[key]; ok2 && !e2.fetching && e2.lastErr == nil && e2.path == path && e2.size == size {
+				delete(c.entries, key)
+				c.removeFromLRU(key)
+				c.curBytes -= e2.size
+			}
+			c.mu.Unlock()
+			continue
+		}
+
+		if e, ok := c.entries[key]; ok && e.fetching {
+			ch := make(chan struct{})
+			e.waiters = append(e.waiters, ch)
+			c.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return "", 0, ctx.Err()
+			case <-ch:
+				continue
+			}
+		}
+
+		e := &entry{fetching: true, atime: time.Now()}
+		c.entries[key] = e
 		c.bumpLRU(key)
 		c.mu.Unlock()
-		if st, err := os.Stat(path); err == nil && st.Size() == size {
-			return path, size, nil
-		}
-		// File missing or changed: treat as miss.
-		delete(c.entries, key)
-		c.removeFromLRU(key)
-		c.curBytes -= size
+		break
 	}
-
-	// In-flight fetch: wait.
-	if e, ok := c.entries[key]; ok && e.fetching {
-		ch := make(chan struct{})
-		e.waiters = append(e.waiters, ch)
-		c.mu.Unlock()
-
-		select {
-		case <-ctx.Done():
-			return "", 0, ctx.Err()
-		case <-ch:
-			// re-check
-			return c.GetOrFetch(ctx, key, fetch)
-		}
-	}
-
-	// Start fetch.
-	e := &entry{fetching: true, atime: time.Now()}
-	c.entries[key] = e
-	c.bumpLRU(key)
-	c.mu.Unlock()
 
 	finalPath := filepath.Join(c.dir, key+".blob")
 	tmpPath := finalPath + ".tmp"
@@ -259,4 +261,3 @@ func (c *Cache) StoreFromPath(key string, srcPath string) (string, int64, error)
 
 	return finalPath, st.Size(), nil
 }
-

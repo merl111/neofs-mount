@@ -26,7 +26,7 @@ type FileConfig struct {
 	RPCEndpoint *string `toml:"rpc_endpoint,omitempty"` // overrides default RPC URL
 
 	CacheDir  *string `toml:"cache_dir,omitempty"`
-	CacheSize *int64   `toml:"cache_size,omitempty"`
+	CacheSize *int64  `toml:"cache_size,omitempty"`
 
 	// Windows CfAPI: seconds to reuse in-memory directory listings (placeholder fetch). Zero = default 5s.
 	FetchDirCacheSeconds *int `toml:"fetch_dir_cache_seconds,omitempty"`

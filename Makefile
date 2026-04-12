@@ -75,6 +75,7 @@ $(APPIMAGETOOL):
 
 build-linux-appimage: $(APPIMAGETOOL)
 	$(call mkdir_p,$(DIST_DIR))
+	rm -rf $(BIN_DIR)/AppDir
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build $(LDFLAGS) -o $(BIN_DIR)/neofs-mount-tray ./cmd/neofs-mount-tray
 	$(call mkdir_p,$(BIN_DIR)/AppDir/usr/bin)
 	cp $(BIN_DIR)/neofs-mount-tray $(BIN_DIR)/AppDir/usr/bin/
@@ -82,10 +83,10 @@ build-linux-appimage: $(APPIMAGETOOL)
 	echo "[Desktop Entry]" > $(BIN_DIR)/AppDir/neofs-mount-tray.desktop
 	echo "Name=neofs-mount-tray" >> $(BIN_DIR)/AppDir/neofs-mount-tray.desktop
 	echo "Exec=neofs-mount-tray" >> $(BIN_DIR)/AppDir/neofs-mount-tray.desktop
-	echo "Icon=logo-tray" >> $(BIN_DIR)/AppDir/neofs-mount-tray.desktop
+	echo "Icon=logo" >> $(BIN_DIR)/AppDir/neofs-mount-tray.desktop
 	echo "Type=Application" >> $(BIN_DIR)/AppDir/neofs-mount-tray.desktop
 	echo "Categories=Utility;" >> $(BIN_DIR)/AppDir/neofs-mount-tray.desktop
-	cp logo-tray.png $(BIN_DIR)/AppDir/logo-tray.png
+	cp logo.png $(BIN_DIR)/AppDir/logo.png
 	cd $(BIN_DIR) && ./appimagetool --appimage-extract-and-run AppDir neofs-mount-tray-linux-amd64.AppImage
 	mv $(BIN_DIR)/neofs-mount-tray*.AppImage $(DIST_DIR)/neofs-mount-tray-linux-amd64.AppImage || true
 	rm -rf $(BIN_DIR)/AppDir

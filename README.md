@@ -6,8 +6,11 @@
 
 Mount [NeoFS](https://github.com/nspcc-dev/neofs-node) containers as a local filesystem on **Linux** (FUSE) and **macOS** (Apple **File Provider**), with a **native Windows** Cloud Files integration (CfAPI). Includes a cross-platform Fyne system tray app.
 
+> **Project status:** neoFS-mount is **early-stage alpha** software. APIs, on-disk formats, and behavior may change without notice. **Do not use it in production** or for data you cannot afford to lose or recreate. Expect rough edges, incomplete error handling, and missing safeguards compared to mature storage clients.
+
 ## Features
 - **Linux:** FUSE mount (`fuse3`); browse and edit NeoFS objects as normal files.
+- **Linux FUSE resilience:** The object cache serializes concurrent fetches for the same key without recursive re-entry. File `Open` retries transient `ObjectGet` / stream errors, logs hard failures, and re-fetches if a cached blob file is missing or stale.
 - **macOS:** **File Provider** host app + extension ([`macos/NeoFSMount`](macos/NeoFSMount/README.md)) linked to a **Go static library** (`macos/GoBridge`); Finder integration without macFUSE for the default path. The tray **Mount** action launches `org.neofs.mount`.
 - **Windows:** Cloud Sync Provider via CfAPI (see [`internal/cfapi`](internal/cfapi/cfapi.go)).
 - **Cross-Platform System Tray:** `neofs-mount-tray` for settings, GAS balance, and top-up.
@@ -49,6 +52,8 @@ make build-all
 ```
 
 Fyne tray builds for Mac/Linux often use [fyne-cross](https://github.com/fyne-io/fyne-cross) (see `Makefile`). The **macOS File Provider** `.app` is built with **Xcode** on a Mac (or `macos-latest` in CI).
+
+The Linux **AppImage** target (`make build-linux-appimage`) clears a stale `bin/AppDir` before packaging and ships the main **`logo.png`** as the desktop icon (see `Makefile`).
 
 ## Documentation
 - [Configuration & Settings](docs/CONFIG.md)

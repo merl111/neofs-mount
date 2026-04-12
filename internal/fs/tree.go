@@ -12,9 +12,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
-	"strings"
 	"syscall"
 	"time"
 
@@ -33,11 +33,11 @@ import (
 type rootNode struct {
 	fs.Inode
 
-	log          *slog.Logger
-	neo          *neofs.Client
-	cache        *cache.Cache
-	dirCache     *dirCache
-	ro           bool
+	log           *slog.Logger
+	neo           *neofs.Client
+	cache         *cache.Cache
+	dirCache      *dirCache
+	ro            bool
 	epoch         uint64
 	uploadTracker *uploads.Tracker
 	uploadHistory *uploads.History
@@ -202,7 +202,6 @@ found:
 	return n.NewInode(ctx, child, st), 0
 }
 
-
 func sanitizeDirName(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.Trim(s, "/")
@@ -243,12 +242,12 @@ func makeIgnoreSet(ids []string) map[string]struct{} {
 type containerNode struct {
 	fs.Inode
 
-	log          *slog.Logger
-	neo          *neofs.Client
-	cache        *cache.Cache
-	dirCache     *dirCache
-	ro           bool
-	cnr          cid.ID
+	log           *slog.Logger
+	neo           *neofs.Client
+	cache         *cache.Cache
+	dirCache      *dirCache
+	ro            bool
+	cnr           cid.ID
 	path          string
 	uploadTracker *uploads.Tracker
 	uploadHistory *uploads.History
@@ -375,7 +374,7 @@ func (n *containerNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 		}
 		out.Attr.Uid = uint32(os.Getuid())
 		out.Attr.Gid = uint32(os.Getgid())
-		
+
 		size := uint64(max0(foundFileSize))
 		fileTime := foundFileTime
 
@@ -644,7 +643,7 @@ func (n *containerNode) Mkdir(ctx context.Context, name string, mode uint32, out
 	// Since we are uploading an empty object, we don't need a real file.
 	// But neo.ObjectPut expects an io.Reader. A strings.Reader is sufficient.
 	emptyReader := strings.NewReader("")
-	
+
 	newID, err := n.neo.ObjectPutContentType(ctx, n.cnr, relPath, emptyReader, "", "application/x-directory")
 	if err != nil {
 		return nil, errno(err)
@@ -1063,6 +1062,9 @@ func (n *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 
 	// Read path.
 	if n.obj.IsZero() {
+		if n.log != nil {
+			n.log.Warn("open: object ID is zero", "path", n.relPath, "container", n.cnr.EncodeToString())
+		}
 		return nil, 0, syscall.ENOENT
 	}
 
@@ -1073,27 +1075,86 @@ func (n *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	if n.fileSize >= streamThreshold {
 		_, r, err := n.neo.ObjectGet(ctx, n.cnr, n.obj)
 		if err != nil {
+			if n.log != nil {
+				n.log.Error("open: streaming ObjectGet failed", "path", n.relPath, "obj", n.obj.EncodeToString(), "err", err)
+			}
 			return nil, 0, errno(err)
 		}
 		return &streamingFileHandle{r: r, size: int64(n.fileSize)}, fuse.FOPEN_DIRECT_IO, 0
 	}
 
 	key := cache.Key(n.cnr.EncodeToString(), n.obj.EncodeToString())
-	path, size, err := n.cache.GetOrFetch(ctx, key, func(ctx context.Context, w io.Writer) error {
-		_, r, err := n.neo.ObjectGet(ctx, n.cnr, n.obj)
-		if err != nil {
-			return err
+	fetchPayload := func(ctx context.Context, w io.Writer) error {
+		const maxAttempts = 3
+		cid := n.cnr.EncodeToString()
+		oid := n.obj.EncodeToString()
+		var lastErr error
+		for attempt := range maxAttempts {
+			if attempt > 0 {
+				if seeker, ok := w.(io.Seeker); ok {
+					if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+						return fmt.Errorf("ObjectGet seek-reset %s/%s: %w", cid, oid, err)
+					}
+				}
+				if trunc, ok := w.(interface{ Truncate(int64) error }); ok {
+					_ = trunc.Truncate(0)
+				}
+				wait := time.Duration(attempt) * 500 * time.Millisecond
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(wait):
+				}
+				if n.log != nil {
+					n.log.Warn("ObjectGet retrying", "path", n.relPath, "attempt", attempt+1, "prev_err", lastErr)
+				}
+			}
+			_, r, err := n.neo.ObjectGet(ctx, n.cnr, n.obj)
+			if err != nil {
+				lastErr = fmt.Errorf("ObjectGet %s/%s: %w", cid, oid, err)
+				if isRetryableStreamError(err) {
+					continue
+				}
+				return lastErr
+			}
+			_, copyErr := io.Copy(w, r)
+			r.Close()
+			if copyErr == nil {
+				return nil
+			}
+			lastErr = fmt.Errorf("ObjectGet copy %s/%s: %w", cid, oid, copyErr)
+			if !isRetryableStreamError(copyErr) {
+				return lastErr
+			}
 		}
-		defer r.Close()
-		_, err = io.Copy(w, r)
-		return err
-	})
+		return lastErr
+	}
+	path, size, err := n.cache.GetOrFetch(ctx, key, fetchPayload)
 	if err != nil {
+		if n.log != nil {
+			n.log.Error("open: cache GetOrFetch failed", "path", n.relPath, "obj", n.obj.EncodeToString(), "size", n.fileSize, "err", err)
+		}
 		return nil, 0, errno(err)
 	}
 
 	f, err2 := os.Open(path)
 	if err2 != nil {
+		if n.log != nil {
+			n.log.Error("open: cached blob open failed, retrying fetch", "path", n.relPath, "blob", path, "err", err2)
+		}
+		path, size, err = n.cache.GetOrFetch(ctx, key, fetchPayload)
+		if err != nil {
+			if n.log != nil {
+				n.log.Error("open: retry GetOrFetch also failed", "path", n.relPath, "err", err)
+			}
+			return nil, 0, errno(err)
+		}
+		f, err2 = os.Open(path)
+	}
+	if err2 != nil {
+		if n.log != nil {
+			n.log.Error("open: cached blob open failed after retry", "path", n.relPath, "blob", path, "err", err2)
+		}
 		return nil, 0, syscall.EIO
 	}
 
@@ -1178,7 +1239,6 @@ func (h *streamingFileHandle) Release(ctx context.Context) syscall.Errno {
 	}
 	return 0
 }
-
 
 type uploadFileHandle struct {
 	log           *slog.Logger
@@ -1429,6 +1489,27 @@ func copyFileToWriter(srcPath string, dst io.Writer) error {
 	return err
 }
 
+func isRetryableStreamError(err error) bool {
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, apistatus.ErrObjectNotFound) ||
+		errors.Is(err, apistatus.ErrContainerNotFound) ||
+		errors.Is(err, apistatus.ErrObjectAccessDenied) ||
+		errors.Is(err, apistatus.ErrObjectAlreadyRemoved) {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "unexpected EOF") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "transport is closing") ||
+		strings.Contains(msg, "server closed the stream")
+}
+
 func errno(err error) syscall.Errno {
 	if err == nil {
 		return 0
@@ -1463,4 +1544,3 @@ func max0(v int64) int64 {
 	}
 	return v
 }
-
