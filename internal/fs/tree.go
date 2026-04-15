@@ -1093,11 +1093,13 @@ func (n *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 			)
 		}
 		return &rangeFileHandle{
-			log:      n.log,
-			path:     n.relPath,
-			size:     int64(n.fileSize),
-			trace:    n.traceReads,
-			openedAt: openStarted,
+			log:            n.log,
+			path:           n.relPath,
+			size:           int64(n.fileSize),
+			trace:          n.traceReads,
+			openedAt:       openStarted,
+			sharedCache:    n.cache,
+			sharedCacheKey: cache.Key("range-chunk-v1", n.cnr.EncodeToString(), n.obj.EncodeToString()),
 			fetch: func(ctx context.Context, off, length int64) ([]byte, error) {
 				return n.neo.ReadObjectRangeIDs(ctx, n.cnr, n.obj, off, length)
 			},
@@ -1240,6 +1242,9 @@ type rangeFileHandle struct {
 	size  int64
 	trace bool
 
+	sharedCache    *cache.Cache
+	sharedCacheKey string
+
 	openedAt      time.Time
 	firstReadAtNs atomic.Int64
 	readCalls     atomic.Int64
@@ -1373,7 +1378,7 @@ func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64, allowPre
 			length = h.size - start
 		}
 		fetchStarted := time.Now()
-		buf, err := h.fetchWindow(ctx, start, length)
+		buf, err := h.loadChunk(ctx, start, length)
 		h.recordFetch(start, length, len(buf), time.Since(fetchStarted), err, !allowPrefetch)
 		h.finishChunkFetch(start, buf, err)
 		if err != nil {
@@ -1466,6 +1471,35 @@ func (h *rangeFileHandle) queuePrefetch(start int64) {
 	}()
 }
 
+func (h *rangeFileHandle) loadChunk(ctx context.Context, start, length int64) ([]byte, error) {
+	if h.sharedCache == nil || h.sharedCacheKey == "" {
+		return h.fetchWindow(ctx, start, length)
+	}
+
+	key := cache.Key(
+		h.sharedCacheKey,
+		strconv.FormatInt(start, 10),
+		strconv.FormatInt(length, 10),
+	)
+	path, _, err := h.sharedCache.GetOrFetch(ctx, key, func(ctx context.Context, w io.Writer) error {
+		buf, err := h.fetchWindow(ctx, start, length)
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(buf)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	buf, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
 func (h *rangeFileHandle) fetchWindow(ctx context.Context, off, length int64) ([]byte, error) {
 	const maxAttempts = 3
 	var lastErr error
@@ -1525,19 +1559,35 @@ func (h *rangeFileHandle) Release(ctx context.Context) syscall.Errno {
 
 func (h *rangeFileHandle) noteRead(off int64, length int) {
 	if !h.trace {
+		if off == 0 {
+			h.prefetchTail()
+		}
 		return
 	}
 	h.readCalls.Add(1)
 
 	now := time.Now().UnixNano()
-	if h.firstReadAtNs.CompareAndSwap(0, now) && h.log != nil {
-		h.log.Info("trace: first read",
-			"path", h.path,
-			"off", off,
-			"len", length,
-			"since_open", time.Duration(now-h.openedAt.UnixNano()).Round(time.Millisecond),
-		)
+	if h.firstReadAtNs.CompareAndSwap(0, now) {
+		if off == 0 {
+			h.prefetchTail()
+		}
+		if h.log != nil {
+			h.log.Info("trace: first read",
+				"path", h.path,
+				"off", off,
+				"len", length,
+				"since_open", time.Duration(now-h.openedAt.UnixNano()).Round(time.Millisecond),
+			)
+		}
 	}
+}
+
+func (h *rangeFileHandle) prefetchTail() {
+	tail := h.tailChunkStart()
+	if tail <= 0 {
+		return
+	}
+	h.queuePrefetch(tail)
 }
 
 func (h *rangeFileHandle) recordFetch(off, length int64, got int, elapsed time.Duration, err error, prefetch bool) {
