@@ -1069,18 +1069,18 @@ func (n *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	}
 
 	// Large-file fast path: stream directly from NeoFS without downloading the
-	// entire object first. This keeps Open() non-blocking for multi-GB files so
-	// the file explorer doesn't hang while waiting for a full download.
+	// entire object first. Serve reads through a small in-memory window so large
+	// media files remain seekable without downloading the whole object.
 	const streamThreshold = 64 << 20 // 64 MB
 	if n.fileSize >= streamThreshold {
-		_, r, err := n.neo.ObjectGet(ctx, n.cnr, n.obj)
-		if err != nil {
-			if n.log != nil {
-				n.log.Error("open: streaming ObjectGet failed", "path", n.relPath, "obj", n.obj.EncodeToString(), "err", err)
-			}
-			return nil, 0, errno(err)
-		}
-		return &streamingFileHandle{r: r, size: int64(n.fileSize)}, fuse.FOPEN_DIRECT_IO, 0
+		return &rangeFileHandle{
+			log:  n.log,
+			path: n.relPath,
+			size: int64(n.fileSize),
+			fetch: func(ctx context.Context, off, length int64) ([]byte, error) {
+				return n.neo.ReadObjectRangeIDs(ctx, n.cnr, n.obj, off, length)
+			},
+		}, fuse.FOPEN_DIRECT_IO, 0
 	}
 
 	key := cache.Key(n.cnr.EncodeToString(), n.obj.EncodeToString())
@@ -1185,58 +1185,125 @@ func (h *cachedFileHandle) Release(ctx context.Context) syscall.Errno {
 	return 0
 }
 
-// streamingFileHandle serves large-object reads directly from a NeoFS gRPC
-// stream without buffering the entire file. FOPEN_DIRECT_IO is set on open
-// so the kernel won't try random-access pread semantics.
-//
-// FUSE with DIRECT_IO issues sequential Read calls with incrementing offsets,
-// so we only need to track the current position and discard skipped bytes.
-type streamingFileHandle struct {
-	mu   sync.Mutex
-	r    io.ReadCloser
-	pos  int64 // bytes consumed from r so far
-	size int64
+const (
+	rangeReadAlign    = int64(4096)
+	rangeReadChunkMax = int64(4 << 20)
+)
+
+// rangeFileHandle serves large-object reads through a bounded in-memory window.
+// FOPEN_DIRECT_IO keeps the kernel from caching the full file while still
+// allowing arbitrary-offset reads for media players and scanners.
+type rangeFileHandle struct {
+	log   *slog.Logger
+	path  string
+	fetch func(ctx context.Context, off, length int64) ([]byte, error)
+	size  int64
+
+	mu          sync.Mutex
+	window      []byte
+	windowStart int64
+	windowEnd   int64
 }
 
-var _ = (fs.FileHandle)((*streamingFileHandle)(nil))
-var _ = (fs.FileReader)((*streamingFileHandle)(nil))
-var _ = (fs.FileReleaser)((*streamingFileHandle)(nil))
+var _ = (fs.FileHandle)((*rangeFileHandle)(nil))
+var _ = (fs.FileReader)((*rangeFileHandle)(nil))
+var _ = (fs.FileReleaser)((*rangeFileHandle)(nil))
 
-func (h *streamingFileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+func (h *rangeFileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	if len(dest) == 0 || off >= h.size {
+		return fuse.ReadResultData(nil), 0
+	}
+	if off < 0 {
+		return nil, syscall.EINVAL
+	}
+
+	end := off + int64(len(dest))
+	if end < off {
+		return nil, syscall.EOVERFLOW
+	}
+	if end > h.size {
+		end = h.size
+	}
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if h.r == nil {
-		return fuse.ReadResultData(nil), 0
-	}
-
-	// Discard bytes if the kernel skipped forward.
-	if off > h.pos {
-		if _, err := io.CopyN(io.Discard, h.r, off-h.pos); err != nil && !errors.Is(err, io.EOF) {
-			return nil, syscall.EIO
+	if err := h.ensureWindow(ctx, off, end); err != nil {
+		if h.log != nil {
+			h.log.Error("read: ranged fetch failed", "path", h.path, "off", off, "len", end-off, "err", err)
 		}
-		h.pos = off
-	}
-	if off < h.pos {
-		// Backward seek not supported on a stream — signal EOF.
-		return fuse.ReadResultData(nil), 0
+		return nil, errno(err)
 	}
 
-	n, err := io.ReadFull(h.r, dest)
-	h.pos += int64(n)
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return nil, syscall.EIO
-	}
+	start := int(off - h.windowStart)
+	n := copy(dest, h.window[start:start+int(end-off)])
 	return fuse.ReadResultData(dest[:n]), 0
 }
 
-func (h *streamingFileHandle) Release(ctx context.Context) syscall.Errno {
+func (h *rangeFileHandle) ensureWindow(ctx context.Context, off, end int64) error {
+	if off >= h.windowStart && end <= h.windowEnd {
+		return nil
+	}
+
+	start := off / rangeReadAlign * rangeReadAlign
+	fetchEnd := (end + rangeReadAlign - 1) / rangeReadAlign * rangeReadAlign
+	minEnd := start + rangeReadChunkMax
+	if fetchEnd < minEnd {
+		fetchEnd = minEnd
+	}
+	if fetchEnd > h.size {
+		fetchEnd = h.size
+	}
+
+	buf, err := h.fetchWindow(ctx, start, fetchEnd-start)
+	if err != nil {
+		return err
+	}
+	h.window = buf
+	h.windowStart = start
+	h.windowEnd = start + int64(len(buf))
+	if off < h.windowStart || end > h.windowEnd {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+
+func (h *rangeFileHandle) fetchWindow(ctx context.Context, off, length int64) ([]byte, error) {
+	const maxAttempts = 3
+	var lastErr error
+
+	for attempt := range maxAttempts {
+		if attempt > 0 {
+			wait := time.Duration(attempt) * 500 * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(wait):
+			}
+			if h.log != nil {
+				h.log.Warn("ObjectRange retrying", "path", h.path, "off", off, "len", length, "attempt", attempt+1, "prev_err", lastErr)
+			}
+		}
+
+		buf, err := h.fetch(ctx, off, length)
+		if err == nil {
+			return buf, nil
+		}
+		lastErr = err
+		if !isRetryableStreamError(err) {
+			return nil, err
+		}
+	}
+
+	return nil, lastErr
+}
+
+func (h *rangeFileHandle) Release(ctx context.Context) syscall.Errno {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.r != nil {
-		_ = h.r.Close()
-		h.r = nil
-	}
+	h.window = nil
+	h.windowStart = 0
+	h.windowEnd = 0
 	return 0
 }
 
