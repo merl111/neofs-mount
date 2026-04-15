@@ -35,9 +35,10 @@ func Mount(p MountParams) (*MountedFS, error) {
 	defer cancel()
 
 	neo, err := neofs.New(ctx, neofs.Params{
-		Logger:    log,
-		Endpoint:  p.Endpoint,
-		WalletKey: p.WalletKey,
+		Logger:     log,
+		Endpoint:   p.Endpoint,
+		WalletKey:  p.WalletKey,
+		TraceReads: p.TraceReads,
 	})
 	if err != nil {
 		return nil, err

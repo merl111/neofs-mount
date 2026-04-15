@@ -28,9 +28,10 @@ import (
 type Client struct {
 	log *slog.Logger
 
-	c      *client.Client // read connection: LIST, HEAD, GET, SEARCH
-	cw     *client.Client // write connection: ObjectPut only (separate from reads)
-	signer user.Signer
+	c          *client.Client // read connection: LIST, HEAD, GET, SEARCH
+	cw         *client.Client // write connection: ObjectPut only (separate from reads)
+	signer     user.Signer
+	traceReads bool
 
 	mu             sync.Mutex
 	sessionCache   map[sessionCacheKey]cachedSession
@@ -214,9 +215,10 @@ type cachedSession struct {
 }
 
 type Params struct {
-	Logger    *slog.Logger
-	Endpoint  string
-	WalletKey string // either WIF string, or path to a file containing WIF
+	Logger     *slog.Logger
+	Endpoint   string
+	WalletKey  string // either WIF string, or path to a file containing WIF
+	TraceReads bool
 }
 
 func New(ctx context.Context, p Params) (*Client, error) {
@@ -279,6 +281,7 @@ func New(ctx context.Context, p Params) (*Client, error) {
 		c:              c,
 		cw:             cw,
 		signer:         signer,
+		traceReads:     p.TraceReads,
 		sessionCache:   make(map[sessionCacheKey]cachedSession),
 		searchStrategy: make(map[string]int),
 		scanCache:      make(map[string]cachedScanEntries),
@@ -778,9 +781,38 @@ func (c *Client) readObjectRange(ctx context.Context, containerID cid.ID, object
 	if length == 0 {
 		return []byte{}, nil
 	}
+	trace := c.traceReads && c.log != nil
+	started := time.Now()
+	var initElapsed time.Duration
+	var streamStarted time.Time
+	var readElapsed time.Duration
+	var readOps int
+	var bytesRead int
+	defer func() {
+		if !trace {
+			return
+		}
+		if !streamStarted.IsZero() {
+			readElapsed = time.Since(streamStarted)
+		}
+		c.log.Debug("trace: object range rpc",
+			"container", containerID.EncodeToString(),
+			"obj", objectID.EncodeToString(),
+			"off", offset,
+			"len", length,
+			"bytes", bytesRead,
+			"read_ops", readOps,
+			"init_elapsed", initElapsed.Round(time.Millisecond),
+			"read_elapsed", readElapsed.Round(time.Millisecond),
+			"total_elapsed", time.Since(started).Round(time.Millisecond),
+			"err", err,
+		)
+	}()
 
 	var prm client.PrmObjectRange
+	initStarted := time.Now()
 	r, err := c.c.ObjectRangeInit(ctx, containerID, objectID, uint64(offset), uint64(length), c.signer, prm)
+	initElapsed = time.Since(initStarted)
 	if err != nil {
 		return nil, fmt.Errorf("neofs: ObjectRange init: %w", err)
 	}
@@ -793,10 +825,13 @@ func (c *Client) readObjectRange(ctx context.Context, containerID cid.ID, object
 
 	buf := make([]byte, 0)
 	chunk := make([]byte, 256*1024)
+	streamStarted = time.Now()
 	for {
 		n, readErr := r.Read(chunk)
+		readOps++
 		if n > 0 {
 			buf = append(buf, chunk[:n]...)
+			bytesRead += n
 		}
 		if readErr == io.EOF {
 			break
