@@ -64,16 +64,17 @@ func Mount(p MountParams) (*MountedFS, error) {
 	}
 
 	root := &rootNode{
-		log:              log,
-		neo:              neo,
-		cache:            cch,
-		dirCache:         newDirCache(5 * time.Minute),
-		ro:               p.ReadOnly,
-		traceReads:       p.TraceReads,
-		ignoreContainers: makeIgnoreSet(p.IgnoreContainerIDs),
-		uploadTracker:    p.UploadTracker,
-		uploadHistory:    p.UploadHistory,
-		audit:            auditLog,
+		log:                    log,
+		neo:                    neo,
+		cache:                  cch,
+		dirCache:               newDirCache(5 * time.Minute),
+		ro:                     p.ReadOnly,
+		traceReads:             p.TraceReads,
+		streamLookaheadWindows: p.StreamLookaheadWindows,
+		ignoreContainers:       makeIgnoreSet(p.IgnoreContainerIDs),
+		uploadTracker:          p.UploadTracker,
+		uploadHistory:          p.UploadHistory,
+		audit:                  auditLog,
 	}
 
 	// Use long kernel-level TTLs: NeoFS objects are immutable, so stale dentry/attr

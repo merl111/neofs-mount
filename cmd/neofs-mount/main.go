@@ -26,8 +26,9 @@ type appConfig struct {
 	walletKey  string
 	mountpoint string
 
-	readOnly   bool
-	traceReads bool
+	readOnly               bool
+	traceReads             bool
+	streamLookaheadWindows int
 
 	cacheDir  string
 	cacheSize int64
@@ -73,6 +74,7 @@ func main() {
 	flag.StringVar(&cfg.mountpoint, "mountpoint", "", "Mountpoint directory")
 	flag.BoolVar(&cfg.readOnly, "read-only", false, "Mount read-only")
 	flag.BoolVar(&cfg.traceReads, "trace-reads", false, "Log detailed Linux read-path timing for profiling")
+	flag.IntVar(&cfg.streamLookaheadWindows, "stream-lookahead-windows", 2, "Number of full 4MiB windows to prefetch ahead during sequential streaming")
 	flag.StringVar(&cfg.cacheDir, "cache-dir", "", "Cache directory (default: OS temp dir)")
 	flag.Int64Var(&cfg.cacheSize, "cache-size", 1<<30, "Cache size in bytes (default: 1GiB)")
 	flag.StringVar(&cfg.logLevel, "log-level", "info", "Log level: debug|info|warn|error")
@@ -154,7 +156,7 @@ func run(ctx context.Context, log *slog.Logger, cfg appConfig) error {
 	}
 
 	log.Info("starting", "os", runtime.GOOS, "arch", runtime.GOARCH)
-	log.Info("mounting", "mountpoint", mp, "read_only", cfg.readOnly, "cache_dir", cacheDir, "trace_reads", cfg.traceReads)
+	log.Info("mounting", "mountpoint", mp, "read_only", cfg.readOnly, "cache_dir", cacheDir, "trace_reads", cfg.traceReads, "stream_lookahead_windows", cfg.streamLookaheadWindows)
 
 	auditPath := config.DefaultAuditLogPath()
 	if cfg.auditFromConfig {
@@ -162,16 +164,17 @@ func run(ctx context.Context, log *slog.Logger, cfg appConfig) error {
 	}
 
 	mnt, err := fs.Mount(fs.MountParams{
-		Logger:             log,
-		Endpoint:           cfg.endpoint,
-		WalletKey:          cfg.walletKey,
-		Mountpoint:         mp,
-		ReadOnly:           cfg.readOnly,
-		TraceReads:         cfg.traceReads,
-		CacheDir:           cacheDir,
-		CacheSize:          cfg.cacheSize,
-		IgnoreContainerIDs: cfg.ignoreContainerIDs,
-		AuditLogPath:       auditPath,
+		Logger:                 log,
+		Endpoint:               cfg.endpoint,
+		WalletKey:              cfg.walletKey,
+		Mountpoint:             mp,
+		ReadOnly:               cfg.readOnly,
+		TraceReads:             cfg.traceReads,
+		StreamLookaheadWindows: cfg.streamLookaheadWindows,
+		CacheDir:               cacheDir,
+		CacheSize:              cfg.cacheSize,
+		IgnoreContainerIDs:     cfg.ignoreContainerIDs,
+		AuditLogPath:           auditPath,
 	})
 	if err != nil {
 		return err
