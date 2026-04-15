@@ -1197,6 +1197,9 @@ type rangeChunk struct {
 	data   []byte
 	useSeq uint64
 	pinned bool
+
+	fetching bool
+	waiters  []chan struct{}
 }
 
 // rangeFileHandle serves large-object reads through a bounded in-memory chunk cache.
@@ -1235,11 +1238,9 @@ func (h *rangeFileHandle) Read(ctx context.Context, dest []byte, off int64) (fus
 		end = h.size
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	for start := h.chunkStart(off); start < end; start += rangeReadChunkSize {
-		if err := h.ensureChunk(ctx, start); err != nil {
+	written := 0
+	for pos := off; pos < end; {
+		if err := h.ensureChunk(ctx, h.chunkStart(pos), true); err != nil {
 			if isCanceledReadError(err) {
 				if h.log != nil {
 					h.log.Debug("read: ranged fetch canceled", "path", h.path, "off", off, "len", end-off)
@@ -1251,13 +1252,12 @@ func (h *rangeFileHandle) Read(ctx context.Context, dest []byte, off int64) (fus
 			}
 			return nil, errno(err)
 		}
-	}
 
-	written := 0
-	for pos := off; pos < end; {
+		h.mu.Lock()
 		ch := h.lookupChunk(pos)
 		if ch == nil {
-			return nil, syscall.EIO
+			h.mu.Unlock()
+			continue
 		}
 		chunkOff := int(pos - ch.start)
 		take := len(ch.data) - chunkOff
@@ -1266,6 +1266,7 @@ func (h *rangeFileHandle) Read(ctx context.Context, dest []byte, off int64) (fus
 			take = remain
 		}
 		written += copy(dest[written:written+take], ch.data[chunkOff:chunkOff+take])
+		h.mu.Unlock()
 		pos += int64(take)
 	}
 	return fuse.ReadResultData(dest[:written]), 0
@@ -1282,55 +1283,100 @@ func (h *rangeFileHandle) tailChunkStart() int64 {
 	return h.chunkStart(h.size - 1)
 }
 
-func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64) error {
-	if ch, ok := h.chunks[start]; ok {
-		h.touchChunk(ch)
+func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64, allowPrefetch bool) error {
+	for {
+		h.mu.Lock()
+		if h.chunks == nil {
+			h.chunks = make(map[int64]*rangeChunk)
+		}
+		if ch, ok := h.chunks[start]; ok {
+			if ch.fetching {
+				wait := make(chan struct{})
+				ch.waiters = append(ch.waiters, wait)
+				h.mu.Unlock()
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-wait:
+					continue
+				}
+			}
+			h.touchChunkLocked(ch)
+			h.mu.Unlock()
+			return nil
+		}
+
+		ch := &rangeChunk{
+			start:    start,
+			pinned:   start == 0 || start == h.tailChunkStart(),
+			fetching: true,
+		}
+		h.touchChunkLocked(ch)
+		h.chunks[start] = ch
+		h.mu.Unlock()
+
+		length := rangeReadChunkSize
+		if start+length > h.size {
+			length = h.size - start
+		}
+		buf, err := h.fetchWindow(ctx, start, length)
+		h.finishChunkFetch(start, buf, err)
+		if err != nil {
+			return err
+		}
+		if allowPrefetch {
+			h.queuePrefetch(start + rangeReadChunkSize)
+		}
 		return nil
 	}
-	if h.chunks == nil {
-		h.chunks = make(map[int64]*rangeChunk)
-	}
-
-	length := rangeReadChunkSize
-	if start+length > h.size {
-		length = h.size - start
-	}
-	buf, err := h.fetchWindow(ctx, start, length)
-	if err != nil {
-		return err
-	}
-
-	ch := &rangeChunk{
-		start:  start,
-		data:   buf,
-		pinned: start == 0 || start == h.tailChunkStart(),
-	}
-	h.touchChunk(ch)
-	h.chunks[start] = ch
-	h.evictChunks()
-	return nil
 }
 
 func (h *rangeFileHandle) lookupChunk(off int64) *rangeChunk {
 	start := h.chunkStart(off)
 	ch, ok := h.chunks[start]
-	if !ok {
+	if !ok || ch.fetching {
 		return nil
 	}
-	h.touchChunk(ch)
+	h.touchChunkLocked(ch)
 	return ch
 }
 
-func (h *rangeFileHandle) touchChunk(ch *rangeChunk) {
+func (h *rangeFileHandle) touchChunkLocked(ch *rangeChunk) {
 	h.useSeq++
 	ch.useSeq = h.useSeq
 }
 
-func (h *rangeFileHandle) evictChunks() {
+func (h *rangeFileHandle) finishChunkFetch(start int64, buf []byte, err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	ch, ok := h.chunks[start]
+	if !ok {
+		return
+	}
+	if err != nil {
+		delete(h.chunks, start)
+		for _, wait := range ch.waiters {
+			close(wait)
+		}
+		return
+	}
+
+	ch.data = buf
+	ch.fetching = false
+	h.touchChunkLocked(ch)
+	h.evictChunksLocked()
+	for _, wait := range ch.waiters {
+		close(wait)
+	}
+	ch.waiters = nil
+}
+
+func (h *rangeFileHandle) evictChunksLocked() {
 	for len(h.chunks) > rangeReadMaxChunks {
 		var victim *rangeChunk
 		for _, ch := range h.chunks {
-			if ch.pinned {
+			if ch.pinned || ch.fetching {
 				continue
 			}
 			if victim == nil || ch.useSeq < victim.useSeq {
@@ -1342,6 +1388,27 @@ func (h *rangeFileHandle) evictChunks() {
 		}
 		delete(h.chunks, victim.start)
 	}
+}
+
+func (h *rangeFileHandle) queuePrefetch(start int64) {
+	if start < 0 || start >= h.size {
+		return
+	}
+
+	h.mu.Lock()
+	if ch, ok := h.chunks[start]; ok && (ch.fetching || ch.data != nil) {
+		h.mu.Unlock()
+		return
+	}
+	h.mu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := h.ensureChunk(ctx, start, false); err != nil && h.log != nil && !isCanceledReadError(err) {
+			h.log.Debug("read: ranged prefetch failed", "path", h.path, "off", start, "err", err)
+		}
+	}()
 }
 
 func (h *rangeFileHandle) fetchWindow(ctx context.Context, off, length int64) ([]byte, error) {

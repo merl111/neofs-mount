@@ -5,8 +5,11 @@ package fs
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -151,6 +154,84 @@ func TestRangeFileHandleReadReturnsEintrOnCanceledFetch(t *testing.T) {
 	}
 }
 
+func TestRangeFileHandleReadCollapsesConcurrentSameChunkFetch(t *testing.T) {
+	payload := patternedBytes(int(rangeReadChunkSize))
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var calls atomic.Int32
+
+	h := &rangeFileHandle{
+		size: int64(len(payload)),
+		fetch: func(ctx context.Context, off, length int64) ([]byte, error) {
+			calls.Add(1)
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-release
+			return append([]byte(nil), payload[off:off+length]...), nil
+		},
+	}
+
+	errCh := make(chan error, 2)
+	go func() { errCh <- verifyRangeRead(h, 0, 32<<10) }()
+	go func() { errCh <- verifyRangeRead(h, 128<<10, 32<<10) }()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for chunk fetch to start")
+	}
+	close(release)
+
+	for range 2 {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("fetch calls = %d, want 1", got)
+	}
+}
+
+func TestRangeFileHandleReadFetchesDifferentChunksConcurrently(t *testing.T) {
+	payload := patternedBytes(int(2 * rangeReadChunkSize))
+	started := make(chan int64, 2)
+	release := make(chan struct{})
+
+	h := &rangeFileHandle{
+		size: int64(len(payload)),
+		fetch: func(ctx context.Context, off, length int64) ([]byte, error) {
+			started <- off
+			<-release
+			return append([]byte(nil), payload[off:off+length]...), nil
+		},
+	}
+
+	errCh := make(chan error, 2)
+	go func() { errCh <- verifyRangeRead(h, 0, 32<<10) }()
+	go func() { errCh <- verifyRangeRead(h, rangeReadChunkSize, 32<<10) }()
+
+	seen := make(map[int64]struct{}, 2)
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for len(seen) < 2 {
+		select {
+		case off := <-started:
+			seen[off] = struct{}{}
+		case <-deadline.C:
+			t.Fatalf("concurrent reads did not start two fetches")
+		}
+	}
+
+	close(release)
+	for range 2 {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func patternedBytes(n int) []byte {
 	buf := make([]byte, n)
 	for i := range buf {
@@ -175,4 +256,22 @@ func readRangeHandle(t *testing.T, h *rangeFileHandle, off int64, size int) []by
 	}
 
 	return append([]byte(nil), got...)
+}
+
+func verifyRangeRead(h *rangeFileHandle, off int64, size int) error {
+	buf := make([]byte, size)
+	res, errno := h.Read(context.Background(), buf, off)
+	if errno != 0 {
+		return fmt.Errorf("read errno = %v", errno)
+	}
+
+	got, status := res.Bytes(nil)
+	res.Done()
+	if status != fuse.OK {
+		return fmt.Errorf("read status = %v", status)
+	}
+	if len(got) != size {
+		return fmt.Errorf("read len = %d, want %d", len(got), size)
+	}
+	return nil
 }
