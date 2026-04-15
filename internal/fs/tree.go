@@ -1436,8 +1436,8 @@ func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64, needEnd 
 		if err != nil {
 			return err
 		}
-		if allowPrefetch && int64(len(buf)) > rangeReadProbeChunkSize {
-			nextStart := start + int64(len(buf))
+		if allowPrefetch && int64(len(buf)) >= rangeReadChunkSize {
+			nextStart := start + rangeReadChunkSize
 			nextEnd := nextStart + rangeReadChunkSize
 			if nextEnd > h.size {
 				nextEnd = h.size
