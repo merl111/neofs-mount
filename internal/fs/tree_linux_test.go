@@ -265,6 +265,46 @@ func TestRangeFileHandleReadExpandsProbeChunk(t *testing.T) {
 	}
 }
 
+func TestRangeFileHandleEnsureChunkPrefetchesTwoFullLookaheadWindows(t *testing.T) {
+	payload := patternedBytes(int(3 * rangeReadChunkSize))
+	calls := make(chan rangeFetchCall, 3)
+
+	h := &rangeFileHandle{
+		size: int64(len(payload)),
+		fetch: func(ctx context.Context, off, length int64) ([]byte, error) {
+			calls <- rangeFetchCall{off: off, length: length}
+			return append([]byte(nil), payload[off:off+length]...), nil
+		},
+	}
+
+	if err := h.ensureChunk(context.Background(), 0, rangeReadChunkSize, true); err != nil {
+		t.Fatalf("ensureChunk err = %v", err)
+	}
+
+	var got []rangeFetchCall
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for len(got) < 3 {
+		select {
+		case call := <-calls:
+			got = append(got, call)
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for prefetches, got %d calls", len(got))
+		}
+	}
+
+	want := []rangeFetchCall{
+		{off: 0, length: rangeReadChunkSize},
+		{off: rangeReadChunkSize, length: rangeReadChunkSize},
+		{off: 2 * rangeReadChunkSize, length: rangeReadChunkSize},
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("call[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
 func patternedBytes(n int) []byte {
 	buf := make([]byte, n)
 	for i := range buf {

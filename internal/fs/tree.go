@@ -1219,6 +1219,7 @@ const (
 	rangeReadChunkSize      = int64(4 << 20)
 	rangeReadProbeChunkSize = int64(512 << 10)
 	rangeReadMaxChunks      = 8
+	rangeReadLookaheadFull  = 2
 )
 
 type rangeChunk struct {
@@ -1437,23 +1438,37 @@ func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64, needEnd 
 			return err
 		}
 		if allowPrefetch {
-			var nextSpan int64
-			switch int64(len(buf)) {
-			case rangeReadProbeChunkSize:
-				nextSpan = rangeReadProbeChunkSize
-			case rangeReadChunkSize:
-				nextSpan = rangeReadChunkSize
-			}
-			nextStart := start + int64(len(buf))
-			nextEnd := nextStart + nextSpan
-			if nextSpan > 0 && nextStart < h.size {
-				if nextEnd > h.size {
-					nextEnd = h.size
-				}
-				h.queuePrefetch(nextStart, nextEnd)
-			}
+			h.queueLookahead(start, int64(len(buf)))
 		}
 		return nil
+	}
+}
+
+func (h *rangeFileHandle) queueLookahead(start, fetchedLen int64) {
+	var nextSpan int64
+	windows := 0
+
+	switch fetchedLen {
+	case rangeReadProbeChunkSize:
+		nextSpan = rangeReadProbeChunkSize
+		windows = 1
+	case rangeReadChunkSize:
+		nextSpan = rangeReadChunkSize
+		windows = rangeReadLookaheadFull
+	default:
+		return
+	}
+
+	for i := int64(1); i <= int64(windows); i++ {
+		nextStart := start + fetchedLen*i
+		if nextStart >= h.size {
+			return
+		}
+		nextEnd := nextStart + nextSpan
+		if nextEnd > h.size {
+			nextEnd = h.size
+		}
+		h.queuePrefetch(nextStart, nextEnd)
 	}
 }
 
