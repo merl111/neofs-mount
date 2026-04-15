@@ -43,8 +43,12 @@ func TestRangeFileHandleReadReusesChunk(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("fetch calls = %d, want 1", len(calls))
 	}
-	if calls[0].off != 0 || calls[0].length != int64(len(payload)) {
-		t.Fatalf("first fetch = %+v, want off=0 len=%d", calls[0], len(payload))
+	wantLen := rangeReadProbeChunkSize
+	if wantLen > int64(len(payload)) {
+		wantLen = int64(len(payload))
+	}
+	if calls[0].off != 0 || calls[0].length != wantLen {
+		t.Fatalf("first fetch = %+v, want off=0 len=%d", calls[0], wantLen)
 	}
 }
 
@@ -77,13 +81,16 @@ func TestRangeFileHandleReadSupportsBackwardSeekAcrossChunks(t *testing.T) {
 	if !bytes.Equal(got3, payload[off3:off3+32<<10]) {
 		t.Fatalf("third read mismatch")
 	}
-	if len(calls) != 2 {
-		t.Fatalf("fetch calls = %d, want 2", len(calls))
+	if len(calls) != 3 {
+		t.Fatalf("fetch calls = %d, want 3", len(calls))
 	}
 
 	wantOff2 := off2 / rangeReadChunkSize * rangeReadChunkSize
 	if calls[1].off != wantOff2 {
 		t.Fatalf("second fetch off = %d, want %d", calls[1].off, wantOff2)
+	}
+	if calls[2].off != 0 || calls[2].length != rangeReadChunkSize {
+		t.Fatalf("third fetch = %+v, want off=0 len=%d", calls[2], rangeReadChunkSize)
 	}
 }
 
@@ -229,6 +236,32 @@ func TestRangeFileHandleReadFetchesDifferentChunksConcurrently(t *testing.T) {
 		if err := <-errCh; err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestRangeFileHandleReadExpandsProbeChunk(t *testing.T) {
+	payload := patternedBytes(int(2 * rangeReadChunkSize))
+	var calls []rangeFetchCall
+
+	h := &rangeFileHandle{
+		size: int64(len(payload)),
+		fetch: func(ctx context.Context, off, length int64) ([]byte, error) {
+			calls = append(calls, rangeFetchCall{off: off, length: length})
+			return append([]byte(nil), payload[off:off+length]...), nil
+		},
+	}
+
+	readRangeHandle(t, h, 0, 32<<10)
+	readRangeHandle(t, h, rangeReadProbeChunkSize+32<<10, 32<<10)
+
+	if len(calls) != 2 {
+		t.Fatalf("fetch calls = %d, want 2", len(calls))
+	}
+	if calls[0].off != 0 || calls[0].length != rangeReadProbeChunkSize {
+		t.Fatalf("first fetch = %+v, want off=0 len=%d", calls[0], rangeReadProbeChunkSize)
+	}
+	if calls[1].off != 0 || calls[1].length != rangeReadChunkSize {
+		t.Fatalf("second fetch = %+v, want off=0 len=%d", calls[1], rangeReadChunkSize)
 	}
 }
 
