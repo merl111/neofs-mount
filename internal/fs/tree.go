@@ -1231,6 +1231,13 @@ type rangeChunk struct {
 	waiters  []chan struct{}
 }
 
+func (c *rangeChunk) end() int64 {
+	if c == nil {
+		return 0
+	}
+	return c.start + int64(len(c.data))
+}
+
 // rangeFileHandle serves large-object reads through a bounded in-memory chunk cache.
 // FOPEN_DIRECT_IO keeps the kernel from caching the full file while still
 // allowing arbitrary-offset reads for media players and scanners. The first and
@@ -1287,16 +1294,8 @@ func (h *rangeFileHandle) Read(ctx context.Context, dest []byte, off int64) (fus
 
 	written := 0
 	for pos := off; pos < end; {
-		chunkStart := h.chunkStart(pos)
-		chunkEnd := chunkStart + rangeReadChunkSize
-		if chunkEnd > h.size {
-			chunkEnd = h.size
-		}
-		needEnd := end
-		if needEnd > chunkEnd {
-			needEnd = chunkEnd
-		}
-		if err := h.ensureChunk(ctx, chunkStart, needEnd, true); err != nil {
+		start, needEnd := h.planFetch(pos, end)
+		if err := h.ensureChunk(ctx, start, needEnd, true); err != nil {
 			if isCanceledReadError(err) {
 				if h.log != nil {
 					h.log.Debug("read: ranged fetch canceled", "path", h.path, "off", off, "len", end-off)
@@ -1335,11 +1334,54 @@ func (h *rangeFileHandle) chunkStart(off int64) int64 {
 	return off / rangeReadChunkSize * rangeReadChunkSize
 }
 
+func (h *rangeFileHandle) probeStart(off int64) int64 {
+	if off <= 0 {
+		return 0
+	}
+	return off / rangeReadProbeChunkSize * rangeReadProbeChunkSize
+}
+
 func (h *rangeFileHandle) tailChunkStart() int64 {
 	if h.size <= 0 {
 		return 0
 	}
 	return h.chunkStart(h.size - 1)
+}
+
+func (h *rangeFileHandle) tailProbeStart() int64 {
+	if h.size <= 0 {
+		return 0
+	}
+	return h.probeStart(h.size - 1)
+}
+
+func (h *rangeFileHandle) planFetch(off, readEnd int64) (start, needEnd int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if ch := h.lookupChunkLocked(off); ch != nil {
+		start = ch.start
+		needEnd = readEnd
+		maxEnd := ch.start + rangeReadChunkSize
+		if maxEnd > h.size {
+			maxEnd = h.size
+		}
+		if needEnd > maxEnd {
+			needEnd = maxEnd
+		}
+		return start, needEnd
+	}
+
+	start = h.probeStart(off)
+	needEnd = readEnd
+	probeEnd := start + rangeReadProbeChunkSize
+	if probeEnd > h.size {
+		probeEnd = h.size
+	}
+	if needEnd > probeEnd {
+		needEnd = probeEnd
+	}
+	return start, needEnd
 }
 
 func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64, needEnd int64, allowPrefetch bool) error {
@@ -1371,10 +1413,7 @@ func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64, needEnd 
 				h.mu.Unlock()
 				return nil
 			}
-			needEnd = start + rangeReadChunkSize
-			if needEnd > h.size {
-				needEnd = h.size
-			}
+			needEnd = h.nextFetchEnd(ch, needEnd)
 		}
 		if h.trace {
 			h.chunkMisses.Add(1)
@@ -1382,7 +1421,7 @@ func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64, needEnd 
 
 		ch := &rangeChunk{
 			start:    start,
-			pinned:   start == 0 || start == h.tailChunkStart(),
+			pinned:   start == 0 || start == h.tailProbeStart(),
 			fetching: true,
 		}
 		h.touchChunkLocked(ch)
@@ -1397,8 +1436,13 @@ func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64, needEnd 
 		if err != nil {
 			return err
 		}
-		if allowPrefetch {
-			h.queuePrefetch(start + rangeReadChunkSize)
+		if allowPrefetch && int64(len(buf)) > rangeReadProbeChunkSize {
+			nextStart := start + int64(len(buf))
+			nextEnd := nextStart + rangeReadChunkSize
+			if nextEnd > h.size {
+				nextEnd = h.size
+			}
+			h.queuePrefetch(nextStart, nextEnd)
 		}
 		return nil
 	}
@@ -1408,7 +1452,27 @@ func (h *rangeFileHandle) chunkCoversRange(ch *rangeChunk, needEnd int64) bool {
 	if ch == nil {
 		return false
 	}
-	return ch.start+int64(len(ch.data)) >= needEnd
+	return ch.end() >= needEnd
+}
+
+func (h *rangeFileHandle) nextFetchEnd(ch *rangeChunk, needEnd int64) int64 {
+	if ch == nil {
+		return needEnd
+	}
+
+	target := needEnd
+	doubleEnd := ch.start + int64(len(ch.data))*2
+	if doubleEnd > target {
+		target = doubleEnd
+	}
+	maxEnd := ch.start + rangeReadChunkSize
+	if maxEnd > h.size {
+		maxEnd = h.size
+	}
+	if target > maxEnd {
+		target = maxEnd
+	}
+	return target
 }
 
 func (h *rangeFileHandle) fetchLength(start int64, needEnd int64) int64 {
@@ -1430,13 +1494,28 @@ func (h *rangeFileHandle) fetchLength(start int64, needEnd int64) int64 {
 }
 
 func (h *rangeFileHandle) lookupChunk(off int64) *rangeChunk {
-	start := h.chunkStart(off)
-	ch, ok := h.chunks[start]
-	if !ok || ch.fetching {
+	ch := h.lookupChunkLocked(off)
+	if ch == nil {
 		return nil
 	}
 	h.touchChunkLocked(ch)
 	return ch
+}
+
+func (h *rangeFileHandle) lookupChunkLocked(off int64) *rangeChunk {
+	var hit *rangeChunk
+	for _, ch := range h.chunks {
+		if ch == nil || ch.fetching {
+			continue
+		}
+		if off < ch.start || off >= ch.end() {
+			continue
+		}
+		if hit == nil || ch.useSeq > hit.useSeq {
+			hit = ch
+		}
+	}
+	return hit
 }
 
 func (h *rangeFileHandle) touchChunkLocked(ch *rangeChunk) {
@@ -1488,13 +1567,19 @@ func (h *rangeFileHandle) evictChunksLocked() {
 	}
 }
 
-func (h *rangeFileHandle) queuePrefetch(start int64) {
+func (h *rangeFileHandle) queuePrefetch(start, needEnd int64) {
 	if start < 0 || start >= h.size {
 		return
 	}
+	if needEnd <= start {
+		return
+	}
+	if needEnd > h.size {
+		needEnd = h.size
+	}
 
 	h.mu.Lock()
-	if ch, ok := h.chunks[start]; ok && (ch.fetching || ch.data != nil) {
+	if ch, ok := h.chunks[start]; ok && (ch.fetching || h.chunkCoversRange(ch, needEnd)) {
 		h.mu.Unlock()
 		return
 	}
@@ -1503,11 +1588,7 @@ func (h *rangeFileHandle) queuePrefetch(start int64) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		end := start + rangeReadChunkSize
-		if end > h.size {
-			end = h.size
-		}
-		if err := h.ensureChunk(ctx, start, end, false); err != nil && h.log != nil && !isCanceledReadError(err) {
+		if err := h.ensureChunk(ctx, start, needEnd, false); err != nil && h.log != nil && !isCanceledReadError(err) {
 			h.log.Debug("read: ranged prefetch failed", "path", h.path, "off", start, "err", err)
 		}
 	}()
@@ -1625,11 +1706,11 @@ func (h *rangeFileHandle) noteRead(off int64, length int) {
 }
 
 func (h *rangeFileHandle) prefetchTail() {
-	tail := h.tailChunkStart()
+	tail := h.tailProbeStart()
 	if tail <= 0 {
 		return
 	}
-	h.queuePrefetch(tail)
+	h.queuePrefetch(tail, h.size)
 }
 
 func (h *rangeFileHandle) recordFetch(off, length int64, got int, elapsed time.Duration, err error, prefetch bool) {
