@@ -18,6 +18,7 @@ type MountParams struct {
 
 	Mountpoint string
 	ReadOnly   bool
+	TraceReads bool
 
 	CacheDir  string
 	CacheSize int64

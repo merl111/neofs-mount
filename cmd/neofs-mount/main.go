@@ -26,7 +26,8 @@ type appConfig struct {
 	walletKey  string
 	mountpoint string
 
-	readOnly bool
+	readOnly   bool
+	traceReads bool
 
 	cacheDir  string
 	cacheSize int64
@@ -71,6 +72,7 @@ func main() {
 	flag.StringVar(&cfg.walletKey, "wallet-key", "", "NeoFS wallet key: WIF string or path to file containing WIF")
 	flag.StringVar(&cfg.mountpoint, "mountpoint", "", "Mountpoint directory")
 	flag.BoolVar(&cfg.readOnly, "read-only", false, "Mount read-only")
+	flag.BoolVar(&cfg.traceReads, "trace-reads", false, "Log detailed Linux read-path timing for profiling")
 	flag.StringVar(&cfg.cacheDir, "cache-dir", "", "Cache directory (default: OS temp dir)")
 	flag.Int64Var(&cfg.cacheSize, "cache-size", 1<<30, "Cache size in bytes (default: 1GiB)")
 	flag.StringVar(&cfg.logLevel, "log-level", "info", "Log level: debug|info|warn|error")
@@ -152,7 +154,7 @@ func run(ctx context.Context, log *slog.Logger, cfg appConfig) error {
 	}
 
 	log.Info("starting", "os", runtime.GOOS, "arch", runtime.GOARCH)
-	log.Info("mounting", "mountpoint", mp, "read_only", cfg.readOnly, "cache_dir", cacheDir)
+	log.Info("mounting", "mountpoint", mp, "read_only", cfg.readOnly, "cache_dir", cacheDir, "trace_reads", cfg.traceReads)
 
 	auditPath := config.DefaultAuditLogPath()
 	if cfg.auditFromConfig {
@@ -165,6 +167,7 @@ func run(ctx context.Context, log *slog.Logger, cfg appConfig) error {
 		WalletKey:          cfg.walletKey,
 		Mountpoint:         mp,
 		ReadOnly:           cfg.readOnly,
+		TraceReads:         cfg.traceReads,
 		CacheDir:           cacheDir,
 		CacheSize:          cfg.cacheSize,
 		IgnoreContainerIDs: cfg.ignoreContainerIDs,

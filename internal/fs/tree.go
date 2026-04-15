@@ -40,6 +40,7 @@ type rootNode struct {
 	cache         *cache.Cache
 	dirCache      *dirCache
 	ro            bool
+	traceReads    bool
 	epoch         uint64
 	uploadTracker *uploads.Tracker
 	uploadHistory *uploads.History
@@ -184,6 +185,7 @@ found:
 		cache:         n.cache,
 		dirCache:      n.dirCache,
 		ro:            n.ro,
+		traceReads:    n.traceReads,
 		cnr:           cnr,
 		path:          "",
 		uploadTracker: n.uploadTracker,
@@ -249,6 +251,7 @@ type containerNode struct {
 	cache         *cache.Cache
 	dirCache      *dirCache
 	ro            bool
+	traceReads    bool
 	cnr           cid.ID
 	path          string
 	uploadTracker *uploads.Tracker
@@ -348,6 +351,7 @@ func (n *containerNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 			cache:         n.cache,
 			dirCache:      n.dirCache,
 			ro:            n.ro,
+			traceReads:    n.traceReads,
 			cnr:           n.cnr,
 			path:          prefix,
 			uploadTracker: n.uploadTracker,
@@ -416,6 +420,7 @@ func (n *containerNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 			neo:           n.neo,
 			cache:         n.cache,
 			ro:            n.ro,
+			traceReads:    n.traceReads,
 			cnr:           n.cnr,
 			obj:           foundFile,
 			relPath:       prefix,
@@ -551,6 +556,7 @@ func (n *containerNode) Create(ctx context.Context, name string, flags uint32, m
 		neo:           n.neo,
 		cache:         n.cache,
 		ro:            n.ro,
+		traceReads:    n.traceReads,
 		cnr:           n.cnr,
 		obj:           oid.ID{}, // set on upload
 		relPath:       relPath,
@@ -673,6 +679,7 @@ func (n *containerNode) Mkdir(ctx context.Context, name string, mode uint32, out
 		cache:         n.cache,
 		dirCache:      n.dirCache,
 		ro:            n.ro,
+		traceReads:    n.traceReads,
 		cnr:           n.cnr,
 		path:          relPath,
 		uploadTracker: n.uploadTracker,
@@ -824,11 +831,12 @@ func (n *containerNode) listChildren(ctx context.Context) ([]fuse.DirEntry, sysc
 type fileNode struct {
 	fs.Inode
 
-	log   *slog.Logger
-	neo   *neofs.Client
-	cache *cache.Cache
-	ro    bool
-	audit *audit.Log
+	log        *slog.Logger
+	neo        *neofs.Client
+	cache      *cache.Cache
+	ro         bool
+	traceReads bool
+	audit      *audit.Log
 
 	uploadTracker *uploads.Tracker
 	uploadHistory *uploads.History
@@ -1069,16 +1077,27 @@ func (n *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 		}
 		return nil, 0, syscall.ENOENT
 	}
+	openStarted := time.Now()
 
 	// Large-file fast path: stream directly from NeoFS without downloading the
 	// entire object first. Serve reads through a small in-memory window so large
 	// media files remain seekable without downloading the whole object.
 	const streamThreshold = 64 << 20 // 64 MB
 	if n.fileSize >= streamThreshold {
+		if n.traceReads && n.log != nil {
+			n.log.Info("trace: stream open",
+				"path", n.relPath,
+				"size", n.fileSize,
+				"threshold", streamThreshold,
+				"elapsed", time.Since(openStarted).Round(time.Millisecond),
+			)
+		}
 		return &rangeFileHandle{
-			log:  n.log,
-			path: n.relPath,
-			size: int64(n.fileSize),
+			log:      n.log,
+			path:     n.relPath,
+			size:     int64(n.fileSize),
+			trace:    n.traceReads,
+			openedAt: openStarted,
 			fetch: func(ctx context.Context, off, length int64) ([]byte, error) {
 				return n.neo.ReadObjectRangeIDs(ctx, n.cnr, n.obj, off, length)
 			},
@@ -1161,6 +1180,13 @@ func (n *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	}
 
 	n.fileSize = uint64(size)
+	if n.traceReads && n.log != nil {
+		n.log.Info("trace: cached open",
+			"path", n.relPath,
+			"size", size,
+			"elapsed", time.Since(openStarted).Round(time.Millisecond),
+		)
+	}
 	return &cachedFileHandle{f: f}, 0, 0
 }
 
@@ -1212,6 +1238,20 @@ type rangeFileHandle struct {
 	path  string
 	fetch func(ctx context.Context, off, length int64) ([]byte, error)
 	size  int64
+	trace bool
+
+	openedAt      time.Time
+	firstReadAtNs atomic.Int64
+	readCalls     atomic.Int64
+	bytesServed   atomic.Int64
+	chunkHits     atomic.Int64
+	chunkMisses   atomic.Int64
+	chunkWaits    atomic.Int64
+	demandFetches atomic.Int64
+	prefetches    atomic.Int64
+	fetchBytes    atomic.Int64
+	fetchNanos    atomic.Int64
+	maxFetchNanos atomic.Int64
 
 	mu     sync.Mutex
 	chunks map[int64]*rangeChunk
@@ -1229,6 +1269,7 @@ func (h *rangeFileHandle) Read(ctx context.Context, dest []byte, off int64) (fus
 	if off < 0 {
 		return nil, syscall.EINVAL
 	}
+	h.noteRead(off, len(dest))
 
 	end := off + int64(len(dest))
 	if end < off {
@@ -1269,6 +1310,9 @@ func (h *rangeFileHandle) Read(ctx context.Context, dest []byte, off int64) (fus
 		h.mu.Unlock()
 		pos += int64(take)
 	}
+	if h.trace {
+		h.bytesServed.Add(int64(written))
+	}
 	return fuse.ReadResultData(dest[:written]), 0
 }
 
@@ -1291,6 +1335,9 @@ func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64, allowPre
 		}
 		if ch, ok := h.chunks[start]; ok {
 			if ch.fetching {
+				if h.trace {
+					h.chunkWaits.Add(1)
+				}
 				wait := make(chan struct{})
 				ch.waiters = append(ch.waiters, wait)
 				h.mu.Unlock()
@@ -1301,9 +1348,15 @@ func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64, allowPre
 					continue
 				}
 			}
+			if h.trace {
+				h.chunkHits.Add(1)
+			}
 			h.touchChunkLocked(ch)
 			h.mu.Unlock()
 			return nil
+		}
+		if h.trace {
+			h.chunkMisses.Add(1)
 		}
 
 		ch := &rangeChunk{
@@ -1319,7 +1372,9 @@ func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64, allowPre
 		if start+length > h.size {
 			length = h.size - start
 		}
+		fetchStarted := time.Now()
 		buf, err := h.fetchWindow(ctx, start, length)
+		h.recordFetch(start, length, len(buf), time.Since(fetchStarted), err, !allowPrefetch)
 		h.finishChunkFetch(start, buf, err)
 		if err != nil {
 			return err
@@ -1442,11 +1497,108 @@ func (h *rangeFileHandle) fetchWindow(ctx context.Context, off, length int64) ([
 }
 
 func (h *rangeFileHandle) Release(ctx context.Context) syscall.Errno {
+	if h.trace && h.log != nil {
+		h.log.Info("trace: stream summary",
+			"path", h.path,
+			"size", h.size,
+			"lifetime", time.Since(h.openedAt).Round(time.Millisecond),
+			"open_to_first_read", h.firstReadDelay().Round(time.Millisecond),
+			"read_calls", h.readCalls.Load(),
+			"bytes_served", h.bytesServed.Load(),
+			"chunk_hits", h.chunkHits.Load(),
+			"chunk_misses", h.chunkMisses.Load(),
+			"chunk_waits", h.chunkWaits.Load(),
+			"demand_fetches", h.demandFetches.Load(),
+			"prefetch_fetches", h.prefetches.Load(),
+			"fetch_bytes", h.fetchBytes.Load(),
+			"fetch_time", time.Duration(h.fetchNanos.Load()).Round(time.Millisecond),
+			"avg_fetch", avgDuration(h.fetchNanos.Load(), h.demandFetches.Load()+h.prefetches.Load()).Round(time.Millisecond),
+			"max_fetch", time.Duration(h.maxFetchNanos.Load()).Round(time.Millisecond),
+		)
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.chunks = nil
 	h.useSeq = 0
 	return 0
+}
+
+func (h *rangeFileHandle) noteRead(off int64, length int) {
+	if !h.trace {
+		return
+	}
+	h.readCalls.Add(1)
+
+	now := time.Now().UnixNano()
+	if h.firstReadAtNs.CompareAndSwap(0, now) && h.log != nil {
+		h.log.Info("trace: first read",
+			"path", h.path,
+			"off", off,
+			"len", length,
+			"since_open", time.Duration(now-h.openedAt.UnixNano()).Round(time.Millisecond),
+		)
+	}
+}
+
+func (h *rangeFileHandle) recordFetch(off, length int64, got int, elapsed time.Duration, err error, prefetch bool) {
+	if !h.trace {
+		return
+	}
+	if prefetch {
+		h.prefetches.Add(1)
+	} else {
+		h.demandFetches.Add(1)
+	}
+	h.fetchBytes.Add(int64(got))
+	h.fetchNanos.Add(elapsed.Nanoseconds())
+	updateMaxAtomic(&h.maxFetchNanos, elapsed.Nanoseconds())
+	if h.log == nil {
+		return
+	}
+
+	h.log.Debug("trace: ranged fetch",
+		"path", h.path,
+		"off", off,
+		"len", length,
+		"bytes", got,
+		"prefetch", prefetch,
+		"elapsed", elapsed.Round(time.Millisecond),
+		"mib_per_sec", formatMiBPerSec(int64(got), elapsed),
+		"err", err,
+	)
+}
+
+func (h *rangeFileHandle) firstReadDelay() time.Duration {
+	if ts := h.firstReadAtNs.Load(); ts > 0 {
+		return time.Duration(ts - h.openedAt.UnixNano())
+	}
+	return 0
+}
+
+func avgDuration(totalNs, count int64) time.Duration {
+	if totalNs <= 0 || count <= 0 {
+		return 0
+	}
+	return time.Duration(totalNs / count)
+}
+
+func updateMaxAtomic(dst *atomic.Int64, value int64) {
+	for {
+		cur := dst.Load()
+		if value <= cur {
+			return
+		}
+		if dst.CompareAndSwap(cur, value) {
+			return
+		}
+	}
+}
+
+func formatMiBPerSec(bytes int64, elapsed time.Duration) float64 {
+	if bytes <= 0 || elapsed <= 0 {
+		return 0
+	}
+	return float64(bytes) / elapsed.Seconds() / (1 << 20)
 }
 
 type uploadFileHandle struct {
