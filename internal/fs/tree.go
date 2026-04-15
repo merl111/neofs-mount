@@ -1436,13 +1436,22 @@ func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64, needEnd 
 		if err != nil {
 			return err
 		}
-		if allowPrefetch && int64(len(buf)) >= rangeReadChunkSize {
-			nextStart := start + rangeReadChunkSize
-			nextEnd := nextStart + rangeReadChunkSize
-			if nextEnd > h.size {
-				nextEnd = h.size
+		if allowPrefetch {
+			var nextSpan int64
+			switch int64(len(buf)) {
+			case rangeReadProbeChunkSize:
+				nextSpan = rangeReadProbeChunkSize
+			case rangeReadChunkSize:
+				nextSpan = rangeReadChunkSize
 			}
-			h.queuePrefetch(nextStart, nextEnd)
+			nextStart := start + int64(len(buf))
+			nextEnd := nextStart + nextSpan
+			if nextSpan > 0 && nextStart < h.size {
+				if nextEnd > h.size {
+					nextEnd = h.size
+				}
+				h.queuePrefetch(nextStart, nextEnd)
+			}
 		}
 		return nil
 	}
