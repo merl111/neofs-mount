@@ -16,10 +16,9 @@ type MountParams struct {
 	Endpoint  string
 	WalletKey string
 
-	Mountpoint             string
-	ReadOnly               bool
-	TraceReads             bool
-	StreamLookaheadWindows int
+	Mountpoint string
+	ReadOnly   bool
+	TraceReads bool
 
 	CacheDir  string
 	CacheSize int64

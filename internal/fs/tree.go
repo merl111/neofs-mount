@@ -35,17 +35,16 @@ import (
 type rootNode struct {
 	fs.Inode
 
-	log                    *slog.Logger
-	neo                    *neofs.Client
-	cache                  *cache.Cache
-	dirCache               *dirCache
-	ro                     bool
-	traceReads             bool
-	streamLookaheadWindows int
-	epoch                  uint64
-	uploadTracker          *uploads.Tracker
-	uploadHistory          *uploads.History
-	audit                  *audit.Log
+	log           *slog.Logger
+	neo           *neofs.Client
+	cache         *cache.Cache
+	dirCache      *dirCache
+	ro            bool
+	traceReads    bool
+	epoch         uint64
+	uploadTracker *uploads.Tracker
+	uploadHistory *uploads.History
+	audit         *audit.Log
 
 	mu            sync.Mutex
 	containerByUI map[string]cid.ID
@@ -181,18 +180,17 @@ found:
 	}
 
 	child := &containerNode{
-		log:                    n.log,
-		neo:                    n.neo,
-		cache:                  n.cache,
-		dirCache:               n.dirCache,
-		ro:                     n.ro,
-		traceReads:             n.traceReads,
-		streamLookaheadWindows: n.streamLookaheadWindows,
-		cnr:                    cnr,
-		path:                   "",
-		uploadTracker:          n.uploadTracker,
-		uploadHistory:          n.uploadHistory,
-		audit:                  n.audit,
+		log:           n.log,
+		neo:           n.neo,
+		cache:         n.cache,
+		dirCache:      n.dirCache,
+		ro:            n.ro,
+		traceReads:    n.traceReads,
+		cnr:           cnr,
+		path:          "",
+		uploadTracker: n.uploadTracker,
+		uploadHistory: n.uploadHistory,
+		audit:         n.audit,
 	}
 
 	out.Attr.Mode = fuse.S_IFDIR | 0o555
@@ -248,18 +246,17 @@ func makeIgnoreSet(ids []string) map[string]struct{} {
 type containerNode struct {
 	fs.Inode
 
-	log                    *slog.Logger
-	neo                    *neofs.Client
-	cache                  *cache.Cache
-	dirCache               *dirCache
-	ro                     bool
-	traceReads             bool
-	streamLookaheadWindows int
-	cnr                    cid.ID
-	path                   string
-	uploadTracker          *uploads.Tracker
-	uploadHistory          *uploads.History
-	audit                  *audit.Log
+	log           *slog.Logger
+	neo           *neofs.Client
+	cache         *cache.Cache
+	dirCache      *dirCache
+	ro            bool
+	traceReads    bool
+	cnr           cid.ID
+	path          string
+	uploadTracker *uploads.Tracker
+	uploadHistory *uploads.History
+	audit         *audit.Log
 }
 
 func (n *containerNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
@@ -349,18 +346,17 @@ func (n *containerNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 			n.log.Debug("lookup dir", "container", n.cnr.EncodeToString(), "name", name)
 		}
 		child := &containerNode{
-			log:                    n.log,
-			neo:                    n.neo,
-			cache:                  n.cache,
-			dirCache:               n.dirCache,
-			ro:                     n.ro,
-			traceReads:             n.traceReads,
-			streamLookaheadWindows: n.streamLookaheadWindows,
-			cnr:                    n.cnr,
-			path:                   prefix,
-			uploadTracker:          n.uploadTracker,
-			uploadHistory:          n.uploadHistory,
-			audit:                  n.audit,
+			log:           n.log,
+			neo:           n.neo,
+			cache:         n.cache,
+			dirCache:      n.dirCache,
+			ro:            n.ro,
+			traceReads:    n.traceReads,
+			cnr:           n.cnr,
+			path:          prefix,
+			uploadTracker: n.uploadTracker,
+			uploadHistory: n.uploadHistory,
+			audit:         n.audit,
 		}
 		out.Attr.Mode = fuse.S_IFDIR | 0o555
 		if !n.ro {
@@ -420,20 +416,19 @@ func (n *containerNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 		out.SetAttrTimeout(5 * time.Minute)
 
 		child := &fileNode{
-			log:                    n.log,
-			neo:                    n.neo,
-			cache:                  n.cache,
-			ro:                     n.ro,
-			traceReads:             n.traceReads,
-			streamLookaheadWindows: n.streamLookaheadWindows,
-			cnr:                    n.cnr,
-			obj:                    foundFile,
-			relPath:                prefix,
-			fileSize:               size,
-			fileTime:               fileTime,
-			uploadTracker:          n.uploadTracker,
-			uploadHistory:          n.uploadHistory,
-			audit:                  n.audit,
+			log:           n.log,
+			neo:           n.neo,
+			cache:         n.cache,
+			ro:            n.ro,
+			traceReads:    n.traceReads,
+			cnr:           n.cnr,
+			obj:           foundFile,
+			relPath:       prefix,
+			fileSize:      size,
+			fileTime:      fileTime,
+			uploadTracker: n.uploadTracker,
+			uploadHistory: n.uploadHistory,
+			audit:         n.audit,
 		}
 		st := fs.StableAttr{Mode: fuse.S_IFREG}
 		return n.NewInode(ctx, child, st), 0
@@ -557,19 +552,18 @@ func (n *containerNode) Create(ctx context.Context, name string, flags uint32, m
 	}
 
 	fn := &fileNode{
-		log:                    n.log,
-		neo:                    n.neo,
-		cache:                  n.cache,
-		ro:                     n.ro,
-		traceReads:             n.traceReads,
-		streamLookaheadWindows: n.streamLookaheadWindows,
-		cnr:                    n.cnr,
-		obj:                    oid.ID{}, // set on upload
-		relPath:                relPath,
-		fileSize:               0,
-		uploadTracker:          n.uploadTracker,
-		uploadHistory:          n.uploadHistory,
-		audit:                  n.audit,
+		log:           n.log,
+		neo:           n.neo,
+		cache:         n.cache,
+		ro:            n.ro,
+		traceReads:    n.traceReads,
+		cnr:           n.cnr,
+		obj:           oid.ID{}, // set on upload
+		relPath:       relPath,
+		fileSize:      0,
+		uploadTracker: n.uploadTracker,
+		uploadHistory: n.uploadHistory,
+		audit:         n.audit,
 	}
 	st := fs.StableAttr{Mode: fuse.S_IFREG}
 	in := n.NewInode(ctx, fn, st)
@@ -680,18 +674,17 @@ func (n *containerNode) Mkdir(ctx context.Context, name string, mode uint32, out
 	n.neo.InvalidateContainerScan(n.cnr)
 
 	child := &containerNode{
-		log:                    n.log,
-		neo:                    n.neo,
-		cache:                  n.cache,
-		dirCache:               n.dirCache,
-		ro:                     n.ro,
-		traceReads:             n.traceReads,
-		streamLookaheadWindows: n.streamLookaheadWindows,
-		cnr:                    n.cnr,
-		path:                   relPath,
-		uploadTracker:          n.uploadTracker,
-		uploadHistory:          n.uploadHistory,
-		audit:                  n.audit,
+		log:           n.log,
+		neo:           n.neo,
+		cache:         n.cache,
+		dirCache:      n.dirCache,
+		ro:            n.ro,
+		traceReads:    n.traceReads,
+		cnr:           n.cnr,
+		path:          relPath,
+		uploadTracker: n.uploadTracker,
+		uploadHistory: n.uploadHistory,
+		audit:         n.audit,
 	}
 
 	out.Attr.Mode = fuse.S_IFDIR | 0o555
@@ -838,13 +831,12 @@ func (n *containerNode) listChildren(ctx context.Context) ([]fuse.DirEntry, sysc
 type fileNode struct {
 	fs.Inode
 
-	log                    *slog.Logger
-	neo                    *neofs.Client
-	cache                  *cache.Cache
-	ro                     bool
-	traceReads             bool
-	streamLookaheadWindows int
-	audit                  *audit.Log
+	log        *slog.Logger
+	neo        *neofs.Client
+	cache      *cache.Cache
+	ro         bool
+	traceReads bool
+	audit      *audit.Log
 
 	uploadTracker *uploads.Tracker
 	uploadHistory *uploads.History
@@ -1101,14 +1093,13 @@ func (n *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 			)
 		}
 		return &rangeFileHandle{
-			log:                  n.log,
-			path:                 n.relPath,
-			size:                 int64(n.fileSize),
-			trace:                n.traceReads,
-			lookaheadFullWindows: n.streamLookaheadWindows,
-			openedAt:             openStarted,
-			sharedCache:          n.cache,
-			sharedCacheKey:       cache.Key("range-chunk-v1", n.cnr.EncodeToString(), n.obj.EncodeToString()),
+			log:            n.log,
+			path:           n.relPath,
+			size:           int64(n.fileSize),
+			trace:          n.traceReads,
+			openedAt:       openStarted,
+			sharedCache:    n.cache,
+			sharedCacheKey: cache.Key("range-chunk-v1", n.cnr.EncodeToString(), n.obj.EncodeToString()),
 			fetch: func(ctx context.Context, off, length int64) ([]byte, error) {
 				return n.neo.ReadObjectRangeIDs(ctx, n.cnr, n.obj, off, length)
 			},
@@ -1260,9 +1251,8 @@ type rangeFileHandle struct {
 	size  int64
 	trace bool
 
-	sharedCache          *cache.Cache
-	sharedCacheKey       string
-	lookaheadFullWindows int
+	sharedCache    *cache.Cache
+	sharedCacheKey string
 
 	openedAt      time.Time
 	firstReadAtNs atomic.Int64
@@ -1464,7 +1454,7 @@ func (h *rangeFileHandle) queueLookahead(start, fetchedLen int64) {
 		windows = 1
 	case rangeReadChunkSize:
 		nextSpan = rangeReadChunkSize
-		windows = h.fullLookaheadWindows()
+		windows = rangeReadLookaheadFull
 	default:
 		return
 	}
@@ -1480,13 +1470,6 @@ func (h *rangeFileHandle) queueLookahead(start, fetchedLen int64) {
 		}
 		h.queuePrefetch(nextStart, nextEnd)
 	}
-}
-
-func (h *rangeFileHandle) fullLookaheadWindows() int {
-	if h.lookaheadFullWindows > 0 {
-		return h.lookaheadFullWindows
-	}
-	return rangeReadLookaheadFull
 }
 
 func (h *rangeFileHandle) chunkCoversRange(ch *rangeChunk, needEnd int64) bool {
