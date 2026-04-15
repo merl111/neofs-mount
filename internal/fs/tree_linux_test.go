@@ -5,6 +5,7 @@ package fs
 import (
 	"bytes"
 	"context"
+	"syscall"
 	"testing"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -15,7 +16,7 @@ type rangeFetchCall struct {
 	length int64
 }
 
-func TestRangeFileHandleReadReusesWindow(t *testing.T) {
+func TestRangeFileHandleReadReusesChunk(t *testing.T) {
 	payload := patternedBytes(2 << 20)
 	var calls []rangeFetchCall
 
@@ -44,8 +45,8 @@ func TestRangeFileHandleReadReusesWindow(t *testing.T) {
 	}
 }
 
-func TestRangeFileHandleReadSupportsBackwardSeekAcrossWindows(t *testing.T) {
-	payload := patternedBytes(int(rangeReadChunkMax + 2<<20))
+func TestRangeFileHandleReadSupportsBackwardSeekAcrossChunks(t *testing.T) {
+	payload := patternedBytes(int(rangeReadChunkSize + 2<<20))
 	var calls []rangeFetchCall
 
 	h := &rangeFileHandle{
@@ -57,7 +58,7 @@ func TestRangeFileHandleReadSupportsBackwardSeekAcrossWindows(t *testing.T) {
 	}
 
 	off1 := int64(0)
-	off2 := rangeReadChunkMax + 128<<10
+	off2 := rangeReadChunkSize + 128<<10
 	off3 := int64(1 << 20)
 
 	got1 := readRangeHandle(t, h, off1, 32<<10)
@@ -73,17 +74,80 @@ func TestRangeFileHandleReadSupportsBackwardSeekAcrossWindows(t *testing.T) {
 	if !bytes.Equal(got3, payload[off3:off3+32<<10]) {
 		t.Fatalf("third read mismatch")
 	}
-	if len(calls) != 3 {
-		t.Fatalf("fetch calls = %d, want 3", len(calls))
+	if len(calls) != 2 {
+		t.Fatalf("fetch calls = %d, want 2", len(calls))
 	}
 
-	wantOff2 := off2 / rangeReadAlign * rangeReadAlign
-	wantOff3 := off3 / rangeReadAlign * rangeReadAlign
+	wantOff2 := off2 / rangeReadChunkSize * rangeReadChunkSize
 	if calls[1].off != wantOff2 {
 		t.Fatalf("second fetch off = %d, want %d", calls[1].off, wantOff2)
 	}
-	if calls[2].off != wantOff3 {
-		t.Fatalf("third fetch off = %d, want %d", calls[2].off, wantOff3)
+}
+
+func TestRangeFileHandleReadSpansChunks(t *testing.T) {
+	payload := patternedBytes(int(rangeReadChunkSize + 2<<20))
+	var calls []rangeFetchCall
+
+	h := &rangeFileHandle{
+		size: int64(len(payload)),
+		fetch: func(ctx context.Context, off, length int64) ([]byte, error) {
+			calls = append(calls, rangeFetchCall{off: off, length: length})
+			return append([]byte(nil), payload[off:off+length]...), nil
+		},
+	}
+
+	off := rangeReadChunkSize - 64<<10
+	got := readRangeHandle(t, h, off, 128<<10)
+	if !bytes.Equal(got, payload[off:off+128<<10]) {
+		t.Fatalf("spanning read mismatch")
+	}
+	if len(calls) != 2 {
+		t.Fatalf("fetch calls = %d, want 2", len(calls))
+	}
+}
+
+func TestRangeFileHandleKeepsHeadAndTailChunks(t *testing.T) {
+	totalChunks := rangeReadMaxChunks + 4
+	payload := patternedBytes(int(rangeReadChunkSize * int64(totalChunks)))
+	var calls []rangeFetchCall
+
+	h := &rangeFileHandle{
+		size: int64(len(payload)),
+		fetch: func(ctx context.Context, off, length int64) ([]byte, error) {
+			calls = append(calls, rangeFetchCall{off: off, length: length})
+			return append([]byte(nil), payload[off:off+length]...), nil
+		},
+	}
+
+	readRangeHandle(t, h, 0, 32<<10)
+	tailOff := int64(len(payload)) - 32<<10
+	readRangeHandle(t, h, tailOff, 32<<10)
+	for i := 1; i <= rangeReadMaxChunks-1; i++ {
+		readRangeHandle(t, h, int64(i)*rangeReadChunkSize, 32<<10)
+	}
+
+	fetchesBeforeReread := len(calls)
+	readRangeHandle(t, h, 0, 32<<10)
+	readRangeHandle(t, h, tailOff, 32<<10)
+	if len(calls) != fetchesBeforeReread {
+		t.Fatalf("head/tail reread triggered new fetches: before=%d after=%d", fetchesBeforeReread, len(calls))
+	}
+}
+
+func TestRangeFileHandleReadReturnsEintrOnCanceledFetch(t *testing.T) {
+	h := &rangeFileHandle{
+		size: 8 << 20,
+		fetch: func(ctx context.Context, off, length int64) ([]byte, error) {
+			return nil, context.Canceled
+		},
+	}
+
+	res, errno := h.Read(context.Background(), make([]byte, 32<<10), 0)
+	if res != nil {
+		t.Fatalf("read result = %#v, want nil", res)
+	}
+	if errno != syscall.EINTR {
+		t.Fatalf("errno = %v, want %v", errno, syscall.EINTR)
 	}
 }
 

@@ -23,6 +23,8 @@ import (
 	apistatus "github.com/nspcc-dev/neofs-sdk-go/client/status"
 	cid "github.com/nspcc-dev/neofs-sdk-go/container/id"
 	oid "github.com/nspcc-dev/neofs-sdk-go/object/id"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/mathias/neofs-mount/internal/audit"
 	"github.com/mathias/neofs-mount/internal/cache"
@@ -1186,23 +1188,31 @@ func (h *cachedFileHandle) Release(ctx context.Context) syscall.Errno {
 }
 
 const (
-	rangeReadAlign    = int64(4096)
-	rangeReadChunkMax = int64(4 << 20)
+	rangeReadChunkSize = int64(4 << 20)
+	rangeReadMaxChunks = 8
 )
 
-// rangeFileHandle serves large-object reads through a bounded in-memory window.
+type rangeChunk struct {
+	start  int64
+	data   []byte
+	useSeq uint64
+	pinned bool
+}
+
+// rangeFileHandle serves large-object reads through a bounded in-memory chunk cache.
 // FOPEN_DIRECT_IO keeps the kernel from caching the full file while still
-// allowing arbitrary-offset reads for media players and scanners.
+// allowing arbitrary-offset reads for media players and scanners. The first and
+// last chunks are retained across seeks to avoid MKV probe thrash between file
+// headers and cues at the tail.
 type rangeFileHandle struct {
 	log   *slog.Logger
 	path  string
 	fetch func(ctx context.Context, off, length int64) ([]byte, error)
 	size  int64
 
-	mu          sync.Mutex
-	window      []byte
-	windowStart int64
-	windowEnd   int64
+	mu     sync.Mutex
+	chunks map[int64]*rangeChunk
+	useSeq uint64
 }
 
 var _ = (fs.FileHandle)((*rangeFileHandle)(nil))
@@ -1228,44 +1238,110 @@ func (h *rangeFileHandle) Read(ctx context.Context, dest []byte, off int64) (fus
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if err := h.ensureWindow(ctx, off, end); err != nil {
-		if h.log != nil {
-			h.log.Error("read: ranged fetch failed", "path", h.path, "off", off, "len", end-off, "err", err)
+	for start := h.chunkStart(off); start < end; start += rangeReadChunkSize {
+		if err := h.ensureChunk(ctx, start); err != nil {
+			if isCanceledReadError(err) {
+				if h.log != nil {
+					h.log.Debug("read: ranged fetch canceled", "path", h.path, "off", off, "len", end-off)
+				}
+				return nil, syscall.EINTR
+			}
+			if h.log != nil {
+				h.log.Error("read: ranged fetch failed", "path", h.path, "off", off, "len", end-off, "err", err)
+			}
+			return nil, errno(err)
 		}
-		return nil, errno(err)
 	}
 
-	start := int(off - h.windowStart)
-	n := copy(dest, h.window[start:start+int(end-off)])
-	return fuse.ReadResultData(dest[:n]), 0
+	written := 0
+	for pos := off; pos < end; {
+		ch := h.lookupChunk(pos)
+		if ch == nil {
+			return nil, syscall.EIO
+		}
+		chunkOff := int(pos - ch.start)
+		take := len(ch.data) - chunkOff
+		remain := int(end - pos)
+		if take > remain {
+			take = remain
+		}
+		written += copy(dest[written:written+take], ch.data[chunkOff:chunkOff+take])
+		pos += int64(take)
+	}
+	return fuse.ReadResultData(dest[:written]), 0
 }
 
-func (h *rangeFileHandle) ensureWindow(ctx context.Context, off, end int64) error {
-	if off >= h.windowStart && end <= h.windowEnd {
+func (h *rangeFileHandle) chunkStart(off int64) int64 {
+	return off / rangeReadChunkSize * rangeReadChunkSize
+}
+
+func (h *rangeFileHandle) tailChunkStart() int64 {
+	if h.size <= 0 {
+		return 0
+	}
+	return h.chunkStart(h.size - 1)
+}
+
+func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64) error {
+	if ch, ok := h.chunks[start]; ok {
+		h.touchChunk(ch)
 		return nil
 	}
-
-	start := off / rangeReadAlign * rangeReadAlign
-	fetchEnd := (end + rangeReadAlign - 1) / rangeReadAlign * rangeReadAlign
-	minEnd := start + rangeReadChunkMax
-	if fetchEnd < minEnd {
-		fetchEnd = minEnd
-	}
-	if fetchEnd > h.size {
-		fetchEnd = h.size
+	if h.chunks == nil {
+		h.chunks = make(map[int64]*rangeChunk)
 	}
 
-	buf, err := h.fetchWindow(ctx, start, fetchEnd-start)
+	length := rangeReadChunkSize
+	if start+length > h.size {
+		length = h.size - start
+	}
+	buf, err := h.fetchWindow(ctx, start, length)
 	if err != nil {
 		return err
 	}
-	h.window = buf
-	h.windowStart = start
-	h.windowEnd = start + int64(len(buf))
-	if off < h.windowStart || end > h.windowEnd {
-		return io.ErrUnexpectedEOF
+
+	ch := &rangeChunk{
+		start:  start,
+		data:   buf,
+		pinned: start == 0 || start == h.tailChunkStart(),
 	}
+	h.touchChunk(ch)
+	h.chunks[start] = ch
+	h.evictChunks()
 	return nil
+}
+
+func (h *rangeFileHandle) lookupChunk(off int64) *rangeChunk {
+	start := h.chunkStart(off)
+	ch, ok := h.chunks[start]
+	if !ok {
+		return nil
+	}
+	h.touchChunk(ch)
+	return ch
+}
+
+func (h *rangeFileHandle) touchChunk(ch *rangeChunk) {
+	h.useSeq++
+	ch.useSeq = h.useSeq
+}
+
+func (h *rangeFileHandle) evictChunks() {
+	for len(h.chunks) > rangeReadMaxChunks {
+		var victim *rangeChunk
+		for _, ch := range h.chunks {
+			if ch.pinned {
+				continue
+			}
+			if victim == nil || ch.useSeq < victim.useSeq {
+				victim = ch
+			}
+		}
+		if victim == nil {
+			return
+		}
+		delete(h.chunks, victim.start)
+	}
 }
 
 func (h *rangeFileHandle) fetchWindow(ctx context.Context, off, length int64) ([]byte, error) {
@@ -1301,9 +1377,8 @@ func (h *rangeFileHandle) fetchWindow(ctx context.Context, off, length int64) ([
 func (h *rangeFileHandle) Release(ctx context.Context) syscall.Errno {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.window = nil
-	h.windowStart = 0
-	h.windowEnd = 0
+	h.chunks = nil
+	h.useSeq = 0
 	return 0
 }
 
@@ -1575,6 +1650,17 @@ func isRetryableStreamError(err error) bool {
 		strings.Contains(msg, "broken pipe") ||
 		strings.Contains(msg, "transport is closing") ||
 		strings.Contains(msg, "server closed the stream")
+}
+
+func isCanceledReadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	code := status.Code(err)
+	return code == codes.Canceled
 }
 
 func errno(err error) syscall.Errno {
