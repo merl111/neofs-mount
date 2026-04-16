@@ -5,8 +5,11 @@ package fs
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -40,8 +43,12 @@ func TestRangeFileHandleReadReusesChunk(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("fetch calls = %d, want 1", len(calls))
 	}
-	if calls[0].off != 0 || calls[0].length != int64(len(payload)) {
-		t.Fatalf("first fetch = %+v, want off=0 len=%d", calls[0], len(payload))
+	wantLen := rangeReadProbeChunkSize
+	if wantLen > int64(len(payload)) {
+		wantLen = int64(len(payload))
+	}
+	if calls[0].off != 0 || calls[0].length != wantLen {
+		t.Fatalf("first fetch = %+v, want off=0 len=%d", calls[0], wantLen)
 	}
 }
 
@@ -74,13 +81,16 @@ func TestRangeFileHandleReadSupportsBackwardSeekAcrossChunks(t *testing.T) {
 	if !bytes.Equal(got3, payload[off3:off3+32<<10]) {
 		t.Fatalf("third read mismatch")
 	}
-	if len(calls) != 2 {
-		t.Fatalf("fetch calls = %d, want 2", len(calls))
+	if len(calls) != 3 {
+		t.Fatalf("fetch calls = %d, want 3", len(calls))
 	}
 
 	wantOff2 := off2 / rangeReadChunkSize * rangeReadChunkSize
 	if calls[1].off != wantOff2 {
 		t.Fatalf("second fetch off = %d, want %d", calls[1].off, wantOff2)
+	}
+	if calls[2].off != 0 || calls[2].length != rangeReadChunkSize {
+		t.Fatalf("third fetch = %+v, want off=0 len=%d", calls[2], rangeReadChunkSize)
 	}
 }
 
@@ -151,6 +161,150 @@ func TestRangeFileHandleReadReturnsEintrOnCanceledFetch(t *testing.T) {
 	}
 }
 
+func TestRangeFileHandleReadCollapsesConcurrentSameChunkFetch(t *testing.T) {
+	payload := patternedBytes(int(rangeReadChunkSize))
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var calls atomic.Int32
+
+	h := &rangeFileHandle{
+		size: int64(len(payload)),
+		fetch: func(ctx context.Context, off, length int64) ([]byte, error) {
+			calls.Add(1)
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-release
+			return append([]byte(nil), payload[off:off+length]...), nil
+		},
+	}
+
+	errCh := make(chan error, 2)
+	go func() { errCh <- verifyRangeRead(h, 0, 32<<10) }()
+	go func() { errCh <- verifyRangeRead(h, 128<<10, 32<<10) }()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for chunk fetch to start")
+	}
+	close(release)
+
+	for range 2 {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("fetch calls = %d, want 1", got)
+	}
+}
+
+func TestRangeFileHandleReadFetchesDifferentChunksConcurrently(t *testing.T) {
+	payload := patternedBytes(int(2 * rangeReadChunkSize))
+	started := make(chan int64, 2)
+	release := make(chan struct{})
+
+	h := &rangeFileHandle{
+		size: int64(len(payload)),
+		fetch: func(ctx context.Context, off, length int64) ([]byte, error) {
+			started <- off
+			<-release
+			return append([]byte(nil), payload[off:off+length]...), nil
+		},
+	}
+
+	errCh := make(chan error, 2)
+	go func() { errCh <- verifyRangeRead(h, 0, 32<<10) }()
+	go func() { errCh <- verifyRangeRead(h, rangeReadChunkSize, 32<<10) }()
+
+	seen := make(map[int64]struct{}, 2)
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for len(seen) < 2 {
+		select {
+		case off := <-started:
+			seen[off] = struct{}{}
+		case <-deadline.C:
+			t.Fatalf("concurrent reads did not start two fetches")
+		}
+	}
+
+	close(release)
+	for range 2 {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestRangeFileHandleReadExpandsProbeChunk(t *testing.T) {
+	payload := patternedBytes(int(2 * rangeReadChunkSize))
+	var calls []rangeFetchCall
+
+	h := &rangeFileHandle{
+		size: int64(len(payload)),
+		fetch: func(ctx context.Context, off, length int64) ([]byte, error) {
+			calls = append(calls, rangeFetchCall{off: off, length: length})
+			return append([]byte(nil), payload[off:off+length]...), nil
+		},
+	}
+
+	readRangeHandle(t, h, 0, 32<<10)
+	readRangeHandle(t, h, rangeReadProbeChunkSize+32<<10, 32<<10)
+
+	if len(calls) != 2 {
+		t.Fatalf("fetch calls = %d, want 2", len(calls))
+	}
+	if calls[0].off != 0 || calls[0].length != rangeReadProbeChunkSize {
+		t.Fatalf("first fetch = %+v, want off=0 len=%d", calls[0], rangeReadProbeChunkSize)
+	}
+	if calls[1].off != 0 || calls[1].length != rangeReadChunkSize {
+		t.Fatalf("second fetch = %+v, want off=0 len=%d", calls[1], rangeReadChunkSize)
+	}
+}
+
+func TestRangeFileHandleEnsureChunkPrefetchesTwoFullLookaheadWindows(t *testing.T) {
+	payload := patternedBytes(int(3 * rangeReadChunkSize))
+	calls := make(chan rangeFetchCall, 3)
+
+	h := &rangeFileHandle{
+		size: int64(len(payload)),
+		fetch: func(ctx context.Context, off, length int64) ([]byte, error) {
+			calls <- rangeFetchCall{off: off, length: length}
+			return append([]byte(nil), payload[off:off+length]...), nil
+		},
+	}
+
+	if err := h.ensureChunk(context.Background(), 0, rangeReadChunkSize, true); err != nil {
+		t.Fatalf("ensureChunk err = %v", err)
+	}
+
+	var got []rangeFetchCall
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for len(got) < 3 {
+		select {
+		case call := <-calls:
+			got = append(got, call)
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for prefetches, got %d calls", len(got))
+		}
+	}
+
+	want := []rangeFetchCall{
+		{off: 0, length: rangeReadChunkSize},
+		{off: rangeReadChunkSize, length: rangeReadChunkSize},
+		{off: 2 * rangeReadChunkSize, length: rangeReadChunkSize},
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("call[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
 func patternedBytes(n int) []byte {
 	buf := make([]byte, n)
 	for i := range buf {
@@ -175,4 +329,22 @@ func readRangeHandle(t *testing.T, h *rangeFileHandle, off int64, size int) []by
 	}
 
 	return append([]byte(nil), got...)
+}
+
+func verifyRangeRead(h *rangeFileHandle, off int64, size int) error {
+	buf := make([]byte, size)
+	res, errno := h.Read(context.Background(), buf, off)
+	if errno != 0 {
+		return fmt.Errorf("read errno = %v", errno)
+	}
+
+	got, status := res.Bytes(nil)
+	res.Done()
+	if status != fuse.OK {
+		return fmt.Errorf("read status = %v", status)
+	}
+	if len(got) != size {
+		return fmt.Errorf("read len = %d, want %d", len(got), size)
+	}
+	return nil
 }

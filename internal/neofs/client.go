@@ -28,9 +28,10 @@ import (
 type Client struct {
 	log *slog.Logger
 
-	c      *client.Client // read connection: LIST, HEAD, GET, SEARCH
-	cw     *client.Client // write connection: ObjectPut only (separate from reads)
-	signer user.Signer
+	c          *client.Client // read connection: LIST, HEAD, GET, SEARCH
+	cw         *client.Client // write connection: ObjectPut only (separate from reads)
+	signer     user.Signer
+	traceReads bool
 
 	mu             sync.Mutex
 	sessionCache   map[sessionCacheKey]cachedSession
@@ -214,9 +215,10 @@ type cachedSession struct {
 }
 
 type Params struct {
-	Logger    *slog.Logger
-	Endpoint  string
-	WalletKey string // either WIF string, or path to a file containing WIF
+	Logger     *slog.Logger
+	Endpoint   string
+	WalletKey  string // either WIF string, or path to a file containing WIF
+	TraceReads bool
 }
 
 func New(ctx context.Context, p Params) (*Client, error) {
@@ -279,6 +281,7 @@ func New(ctx context.Context, p Params) (*Client, error) {
 		c:              c,
 		cw:             cw,
 		signer:         signer,
+		traceReads:     p.TraceReads,
 		sessionCache:   make(map[sessionCacheKey]cachedSession),
 		searchStrategy: make(map[string]int),
 		scanCache:      make(map[string]cachedScanEntries),
@@ -336,6 +339,37 @@ type SearchEntry struct {
 	Time     time.Time         // from Timestamp or LastModified
 	Attrs    map[string]string // all object attributes
 }
+
+const (
+	objectRangeMultipartPartSize   = int64(512 << 10)
+	objectRangeMultipartMinLength  = objectRangeMultipartPartSize * 2
+	objectRangeMultipartMaxWorkers = 10
+	objectRangeHedgeDelay          = 400 * time.Millisecond
+	objectRangeHedgeMinLength      = int64(256 << 10)
+)
+
+type objectRangeRPCStats struct {
+	initElapsed  time.Duration
+	readElapsed  time.Duration
+	totalElapsed time.Duration
+	readOps      int
+	bytesRead    int
+}
+
+type objectRangePart struct {
+	index  int
+	offset int64
+	length int64
+}
+
+type objectRangeResult struct {
+	buf    []byte
+	stats  objectRangeRPCStats
+	err    error
+	source string
+}
+
+type readPrefetchContextKey struct{}
 
 // headScanCacheTTL mirrors how S3 FUSE tools like goofys handle immutable stores:
 // objects never change once written, so a long TTL only means slightly stale listings.
@@ -778,34 +812,302 @@ func (c *Client) readObjectRange(ctx context.Context, containerID cid.ID, object
 	if length == 0 {
 		return []byte{}, nil
 	}
+	trace := c.traceReads && c.log != nil
+	if shouldHedgeObjectRange(ctx, length) {
+		buf, stats, winner, hedged, err := c.readObjectRangeHedged(ctx, containerID, objectID, offset, length)
+		if trace {
+			c.log.Debug("trace: object range hedge",
+				"container", containerID.EncodeToString(),
+				"obj", objectID.EncodeToString(),
+				"off", offset,
+				"len", length,
+				"winner", winner,
+				"hedged", hedged,
+				"hedge_delay", objectRangeHedgeDelay.Round(time.Millisecond),
+				"bytes", stats.bytesRead,
+				"read_ops", stats.readOps,
+				"init_elapsed", stats.initElapsed.Round(time.Millisecond),
+				"read_elapsed", stats.readElapsed.Round(time.Millisecond),
+				"total_elapsed", stats.totalElapsed.Round(time.Millisecond),
+				"err", err,
+			)
+		}
+		return buf, err
+	}
 
-	var prm client.PrmObjectRange
-	r, err := c.c.ObjectRangeInit(ctx, containerID, objectID, uint64(offset), uint64(length), c.signer, prm)
+	buf, stats, err := c.readObjectRangeSingleRPC(ctx, containerID, objectID, offset, length)
+	if trace {
+		c.log.Debug("trace: object range rpc",
+			"container", containerID.EncodeToString(),
+			"obj", objectID.EncodeToString(),
+			"off", offset,
+			"len", length,
+			"bytes", stats.bytesRead,
+			"read_ops", stats.readOps,
+			"init_elapsed", stats.initElapsed.Round(time.Millisecond),
+			"read_elapsed", stats.readElapsed.Round(time.Millisecond),
+			"total_elapsed", stats.totalElapsed.Round(time.Millisecond),
+			"err", err,
+		)
+	}
+	return buf, err
+}
+
+func shouldHedgeObjectRange(ctx context.Context, length int64) bool {
+	if length < objectRangeHedgeMinLength {
+		return false
+	}
+	return !isPrefetchRead(ctx)
+}
+
+func shouldMultipartObjectRange(length int64) bool {
+	return length >= objectRangeMultipartMinLength
+}
+
+func WithPrefetchRead(ctx context.Context) context.Context {
+	return context.WithValue(ctx, readPrefetchContextKey{}, true)
+}
+
+func isPrefetchRead(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(readPrefetchContextKey{}).(bool)
+	return v
+}
+
+func (c *Client) readObjectRangeHedged(ctx context.Context, containerID cid.ID, objectID oid.ID, offset, length int64) (_ []byte, stats objectRangeRPCStats, winner string, hedged bool, err error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	results := make(chan objectRangeResult, 2)
+	launch := func(source string) {
+		go func() {
+			buf, st, callErr := c.readObjectRangeSingleRPC(ctx, containerID, objectID, offset, length)
+			results <- objectRangeResult{
+				buf:    buf,
+				stats:  st,
+				err:    callErr,
+				source: source,
+			}
+		}()
+	}
+
+	launch("primary")
+	timer := time.NewTimer(objectRangeHedgeDelay)
+	defer timer.Stop()
+
+	pending := 1
+	var firstErr error
+	for pending > 0 {
+		select {
+		case res := <-results:
+			pending--
+			if res.err == nil {
+				cancel()
+				return res.buf, res.stats, res.source, hedged, nil
+			}
+			if firstErr == nil {
+				firstErr = res.err
+			}
+		case <-timer.C:
+			if !hedged {
+				hedged = true
+				pending++
+				launch("hedge")
+			}
+		case <-ctx.Done():
+			if firstErr != nil {
+				return nil, objectRangeRPCStats{}, "", hedged, firstErr
+			}
+			return nil, objectRangeRPCStats{}, "", hedged, ctx.Err()
+		}
+	}
+
+	if firstErr == nil {
+		firstErr = context.Canceled
+	}
+	return nil, objectRangeRPCStats{}, "", hedged, firstErr
+}
+
+func splitObjectRange(offset, length int64) []objectRangePart {
+	if length <= 0 {
+		return nil
+	}
+
+	count := int((length + objectRangeMultipartPartSize - 1) / objectRangeMultipartPartSize)
+	parts := make([]objectRangePart, 0, count)
+	for i := 0; i < count; i++ {
+		partOff := offset + int64(i)*objectRangeMultipartPartSize
+		partLen := objectRangeMultipartPartSize
+		if end := offset + length; partOff+partLen > end {
+			partLen = end - partOff
+		}
+		parts = append(parts, objectRangePart{
+			index:  i,
+			offset: partOff,
+			length: partLen,
+		})
+	}
+	return parts
+}
+
+func (c *Client) readObjectRangeMultipart(ctx context.Context, containerID cid.ID, objectID oid.ID, offset, length int64, trace bool) (_ []byte, err error) {
+	started := time.Now()
+	parts := splitObjectRange(offset, length)
+	if len(parts) <= 1 {
+		buf, _, err := c.readObjectRangeSingleRPC(ctx, containerID, objectID, offset, length)
+		return buf, err
+	}
+
+	type partResult struct {
+		part  objectRangePart
+		buf   []byte
+		stats objectRangeRPCStats
+		err   error
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	sem := make(chan struct{}, objectRangeMultipartMaxWorkers)
+	results := make(chan partResult, len(parts))
+
+	for _, part := range parts {
+		part := part
+		go func() {
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				results <- partResult{part: part, err: ctx.Err()}
+				return
+			}
+			defer func() { <-sem }()
+
+			buf, stats, partErr := c.readObjectRangeSingleRPC(ctx, containerID, objectID, part.offset, part.length)
+			results <- partResult{part: part, buf: buf, stats: stats, err: partErr}
+		}()
+	}
+
+	out := make([][]byte, len(parts))
+	var totalBytes int
+	var totalOps int
+	var totalInit time.Duration
+	var totalRead time.Duration
+	var maxPart time.Duration
+
+	for range parts {
+		res := <-results
+		if res.err != nil {
+			if err == nil {
+				err = res.err
+				cancel()
+			}
+			continue
+		}
+		out[res.part.index] = res.buf
+		totalBytes += res.stats.bytesRead
+		totalOps += res.stats.readOps
+		totalInit += res.stats.initElapsed
+		totalRead += res.stats.readElapsed
+		if res.stats.totalElapsed > maxPart {
+			maxPart = res.stats.totalElapsed
+		}
+		if trace {
+			c.log.Debug("trace: object range rpc part",
+				"container", containerID.EncodeToString(),
+				"obj", objectID.EncodeToString(),
+				"part", res.part.index+1,
+				"parts", len(parts),
+				"off", res.part.offset,
+				"len", res.part.length,
+				"bytes", res.stats.bytesRead,
+				"read_ops", res.stats.readOps,
+				"init_elapsed", res.stats.initElapsed.Round(time.Millisecond),
+				"read_elapsed", res.stats.readElapsed.Round(time.Millisecond),
+				"total_elapsed", res.stats.totalElapsed.Round(time.Millisecond),
+			)
+		}
+	}
 	if err != nil {
-		return nil, fmt.Errorf("neofs: ObjectRange init: %w", err)
+		if trace {
+			c.log.Debug("trace: object range rpc multipart",
+				"container", containerID.EncodeToString(),
+				"obj", objectID.EncodeToString(),
+				"off", offset,
+				"len", length,
+				"parts", len(parts),
+				"part_size", objectRangeMultipartPartSize,
+				"workers", objectRangeMultipartMaxWorkers,
+				"total_elapsed", time.Since(started).Round(time.Millisecond),
+				"err", err,
+			)
+		}
+		return nil, err
+	}
+
+	buf := make([]byte, 0, length)
+	for i := range out {
+		buf = append(buf, out[i]...)
+	}
+
+	if trace {
+		c.log.Debug("trace: object range rpc multipart",
+			"container", containerID.EncodeToString(),
+			"obj", objectID.EncodeToString(),
+			"off", offset,
+			"len", length,
+			"parts", len(parts),
+			"part_size", objectRangeMultipartPartSize,
+			"workers", objectRangeMultipartMaxWorkers,
+			"bytes", totalBytes,
+			"read_ops", totalOps,
+			"aggregate_init_elapsed", totalInit.Round(time.Millisecond),
+			"aggregate_read_elapsed", totalRead.Round(time.Millisecond),
+			"slowest_part_elapsed", maxPart.Round(time.Millisecond),
+			"total_elapsed", time.Since(started).Round(time.Millisecond),
+		)
+	}
+
+	return buf, nil
+}
+
+func (c *Client) readObjectRangeSingleRPC(ctx context.Context, containerID cid.ID, objectID oid.ID, offset, length int64) (_ []byte, stats objectRangeRPCStats, err error) {
+	started := time.Now()
+	var prm client.PrmObjectRange
+	initStarted := time.Now()
+	r, err := c.c.ObjectRangeInit(ctx, containerID, objectID, uint64(offset), uint64(length), c.signer, prm)
+	stats.initElapsed = time.Since(initStarted)
+	if err != nil {
+		return nil, stats, fmt.Errorf("neofs: ObjectRange init: %w", err)
 	}
 	defer func() {
 		closeErr := r.Close()
 		if err == nil && closeErr != nil {
 			err = fmt.Errorf("neofs: ObjectRange close: %w", closeErr)
 		}
+		stats.totalElapsed = time.Since(started)
 	}()
 
 	buf := make([]byte, 0)
 	chunk := make([]byte, 256*1024)
+	streamStarted := time.Now()
 	for {
 		n, readErr := r.Read(chunk)
+		stats.readOps++
 		if n > 0 {
 			buf = append(buf, chunk[:n]...)
+			stats.bytesRead += n
 		}
 		if readErr == io.EOF {
 			break
 		}
 		if readErr != nil {
-			return nil, fmt.Errorf("neofs: ObjectRange read: %w", readErr)
+			return nil, stats, fmt.Errorf("neofs: ObjectRange read: %w", readErr)
 		}
 	}
-	return buf, nil
+	stats.readElapsed = time.Since(streamStarted)
+	return buf, stats, nil
 }
 
 // ReadObjectRange streams a byte range from a NeoFS object and returns it as a

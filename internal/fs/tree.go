@@ -40,6 +40,7 @@ type rootNode struct {
 	cache         *cache.Cache
 	dirCache      *dirCache
 	ro            bool
+	traceReads    bool
 	epoch         uint64
 	uploadTracker *uploads.Tracker
 	uploadHistory *uploads.History
@@ -184,6 +185,7 @@ found:
 		cache:         n.cache,
 		dirCache:      n.dirCache,
 		ro:            n.ro,
+		traceReads:    n.traceReads,
 		cnr:           cnr,
 		path:          "",
 		uploadTracker: n.uploadTracker,
@@ -249,6 +251,7 @@ type containerNode struct {
 	cache         *cache.Cache
 	dirCache      *dirCache
 	ro            bool
+	traceReads    bool
 	cnr           cid.ID
 	path          string
 	uploadTracker *uploads.Tracker
@@ -348,6 +351,7 @@ func (n *containerNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 			cache:         n.cache,
 			dirCache:      n.dirCache,
 			ro:            n.ro,
+			traceReads:    n.traceReads,
 			cnr:           n.cnr,
 			path:          prefix,
 			uploadTracker: n.uploadTracker,
@@ -416,6 +420,7 @@ func (n *containerNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 			neo:           n.neo,
 			cache:         n.cache,
 			ro:            n.ro,
+			traceReads:    n.traceReads,
 			cnr:           n.cnr,
 			obj:           foundFile,
 			relPath:       prefix,
@@ -551,6 +556,7 @@ func (n *containerNode) Create(ctx context.Context, name string, flags uint32, m
 		neo:           n.neo,
 		cache:         n.cache,
 		ro:            n.ro,
+		traceReads:    n.traceReads,
 		cnr:           n.cnr,
 		obj:           oid.ID{}, // set on upload
 		relPath:       relPath,
@@ -673,6 +679,7 @@ func (n *containerNode) Mkdir(ctx context.Context, name string, mode uint32, out
 		cache:         n.cache,
 		dirCache:      n.dirCache,
 		ro:            n.ro,
+		traceReads:    n.traceReads,
 		cnr:           n.cnr,
 		path:          relPath,
 		uploadTracker: n.uploadTracker,
@@ -824,11 +831,12 @@ func (n *containerNode) listChildren(ctx context.Context) ([]fuse.DirEntry, sysc
 type fileNode struct {
 	fs.Inode
 
-	log   *slog.Logger
-	neo   *neofs.Client
-	cache *cache.Cache
-	ro    bool
-	audit *audit.Log
+	log        *slog.Logger
+	neo        *neofs.Client
+	cache      *cache.Cache
+	ro         bool
+	traceReads bool
+	audit      *audit.Log
 
 	uploadTracker *uploads.Tracker
 	uploadHistory *uploads.History
@@ -1069,16 +1077,29 @@ func (n *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 		}
 		return nil, 0, syscall.ENOENT
 	}
+	openStarted := time.Now()
 
 	// Large-file fast path: stream directly from NeoFS without downloading the
 	// entire object first. Serve reads through a small in-memory window so large
 	// media files remain seekable without downloading the whole object.
 	const streamThreshold = 64 << 20 // 64 MB
 	if n.fileSize >= streamThreshold {
+		if n.traceReads && n.log != nil {
+			n.log.Info("trace: stream open",
+				"path", n.relPath,
+				"size", n.fileSize,
+				"threshold", streamThreshold,
+				"elapsed", time.Since(openStarted).Round(time.Millisecond),
+			)
+		}
 		return &rangeFileHandle{
-			log:  n.log,
-			path: n.relPath,
-			size: int64(n.fileSize),
+			log:            n.log,
+			path:           n.relPath,
+			size:           int64(n.fileSize),
+			trace:          n.traceReads,
+			openedAt:       openStarted,
+			sharedCache:    n.cache,
+			sharedCacheKey: cache.Key("range-chunk-v1", n.cnr.EncodeToString(), n.obj.EncodeToString()),
 			fetch: func(ctx context.Context, off, length int64) ([]byte, error) {
 				return n.neo.ReadObjectRangeIDs(ctx, n.cnr, n.obj, off, length)
 			},
@@ -1161,6 +1182,13 @@ func (n *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	}
 
 	n.fileSize = uint64(size)
+	if n.traceReads && n.log != nil {
+		n.log.Info("trace: cached open",
+			"path", n.relPath,
+			"size", size,
+			"elapsed", time.Since(openStarted).Round(time.Millisecond),
+		)
+	}
 	return &cachedFileHandle{f: f}, 0, 0
 }
 
@@ -1188,8 +1216,10 @@ func (h *cachedFileHandle) Release(ctx context.Context) syscall.Errno {
 }
 
 const (
-	rangeReadChunkSize = int64(4 << 20)
-	rangeReadMaxChunks = 8
+	rangeReadChunkSize      = int64(4 << 20)
+	rangeReadProbeChunkSize = int64(512 << 10)
+	rangeReadMaxChunks      = 8
+	rangeReadLookaheadFull  = 2
 )
 
 type rangeChunk struct {
@@ -1197,6 +1227,16 @@ type rangeChunk struct {
 	data   []byte
 	useSeq uint64
 	pinned bool
+
+	fetching bool
+	waiters  []chan struct{}
+}
+
+func (c *rangeChunk) end() int64 {
+	if c == nil {
+		return 0
+	}
+	return c.start + int64(len(c.data))
 }
 
 // rangeFileHandle serves large-object reads through a bounded in-memory chunk cache.
@@ -1209,6 +1249,23 @@ type rangeFileHandle struct {
 	path  string
 	fetch func(ctx context.Context, off, length int64) ([]byte, error)
 	size  int64
+	trace bool
+
+	sharedCache    *cache.Cache
+	sharedCacheKey string
+
+	openedAt      time.Time
+	firstReadAtNs atomic.Int64
+	readCalls     atomic.Int64
+	bytesServed   atomic.Int64
+	chunkHits     atomic.Int64
+	chunkMisses   atomic.Int64
+	chunkWaits    atomic.Int64
+	demandFetches atomic.Int64
+	prefetches    atomic.Int64
+	fetchBytes    atomic.Int64
+	fetchNanos    atomic.Int64
+	maxFetchNanos atomic.Int64
 
 	mu     sync.Mutex
 	chunks map[int64]*rangeChunk
@@ -1226,6 +1283,7 @@ func (h *rangeFileHandle) Read(ctx context.Context, dest []byte, off int64) (fus
 	if off < 0 {
 		return nil, syscall.EINVAL
 	}
+	h.noteRead(off, len(dest))
 
 	end := off + int64(len(dest))
 	if end < off {
@@ -1235,11 +1293,10 @@ func (h *rangeFileHandle) Read(ctx context.Context, dest []byte, off int64) (fus
 		end = h.size
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	for start := h.chunkStart(off); start < end; start += rangeReadChunkSize {
-		if err := h.ensureChunk(ctx, start); err != nil {
+	written := 0
+	for pos := off; pos < end; {
+		start, needEnd := h.planFetch(pos, end)
+		if err := h.ensureChunk(ctx, start, needEnd, true); err != nil {
 			if isCanceledReadError(err) {
 				if h.log != nil {
 					h.log.Debug("read: ranged fetch canceled", "path", h.path, "off", off, "len", end-off)
@@ -1251,13 +1308,12 @@ func (h *rangeFileHandle) Read(ctx context.Context, dest []byte, off int64) (fus
 			}
 			return nil, errno(err)
 		}
-	}
 
-	written := 0
-	for pos := off; pos < end; {
+		h.mu.Lock()
 		ch := h.lookupChunk(pos)
 		if ch == nil {
-			return nil, syscall.EIO
+			h.mu.Unlock()
+			continue
 		}
 		chunkOff := int(pos - ch.start)
 		take := len(ch.data) - chunkOff
@@ -1266,13 +1322,24 @@ func (h *rangeFileHandle) Read(ctx context.Context, dest []byte, off int64) (fus
 			take = remain
 		}
 		written += copy(dest[written:written+take], ch.data[chunkOff:chunkOff+take])
+		h.mu.Unlock()
 		pos += int64(take)
+	}
+	if h.trace {
+		h.bytesServed.Add(int64(written))
 	}
 	return fuse.ReadResultData(dest[:written]), 0
 }
 
 func (h *rangeFileHandle) chunkStart(off int64) int64 {
 	return off / rangeReadChunkSize * rangeReadChunkSize
+}
+
+func (h *rangeFileHandle) probeStart(off int64) int64 {
+	if off <= 0 {
+		return 0
+	}
+	return off / rangeReadProbeChunkSize * rangeReadProbeChunkSize
 }
 
 func (h *rangeFileHandle) tailChunkStart() int64 {
@@ -1282,55 +1349,237 @@ func (h *rangeFileHandle) tailChunkStart() int64 {
 	return h.chunkStart(h.size - 1)
 }
 
-func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64) error {
-	if ch, ok := h.chunks[start]; ok {
-		h.touchChunk(ch)
-		return nil
+func (h *rangeFileHandle) tailProbeStart() int64 {
+	if h.size <= 0 {
+		return 0
 	}
-	if h.chunks == nil {
-		h.chunks = make(map[int64]*rangeChunk)
+	return h.probeStart(h.size - 1)
+}
+
+func (h *rangeFileHandle) planFetch(off, readEnd int64) (start, needEnd int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if ch := h.lookupChunkLocked(off); ch != nil {
+		start = ch.start
+		needEnd = readEnd
+		maxEnd := ch.start + rangeReadChunkSize
+		if maxEnd > h.size {
+			maxEnd = h.size
+		}
+		if needEnd > maxEnd {
+			needEnd = maxEnd
+		}
+		return start, needEnd
 	}
 
-	length := rangeReadChunkSize
+	start = h.probeStart(off)
+	needEnd = readEnd
+	probeEnd := start + rangeReadProbeChunkSize
+	if probeEnd > h.size {
+		probeEnd = h.size
+	}
+	if needEnd > probeEnd {
+		needEnd = probeEnd
+	}
+	return start, needEnd
+}
+
+func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64, needEnd int64, allowPrefetch bool) error {
+	for {
+		h.mu.Lock()
+		if h.chunks == nil {
+			h.chunks = make(map[int64]*rangeChunk)
+		}
+		if ch, ok := h.chunks[start]; ok {
+			if ch.fetching {
+				if h.trace {
+					h.chunkWaits.Add(1)
+				}
+				wait := make(chan struct{})
+				ch.waiters = append(ch.waiters, wait)
+				h.mu.Unlock()
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-wait:
+					continue
+				}
+			}
+			if h.chunkCoversRange(ch, needEnd) {
+				if h.trace {
+					h.chunkHits.Add(1)
+				}
+				h.touchChunkLocked(ch)
+				h.mu.Unlock()
+				return nil
+			}
+			needEnd = h.nextFetchEnd(ch, needEnd)
+		}
+		if h.trace {
+			h.chunkMisses.Add(1)
+		}
+
+		ch := &rangeChunk{
+			start:    start,
+			pinned:   start == 0 || start == h.tailProbeStart(),
+			fetching: true,
+		}
+		h.touchChunkLocked(ch)
+		h.chunks[start] = ch
+		h.mu.Unlock()
+
+		length := h.fetchLength(start, needEnd)
+		fetchStarted := time.Now()
+		buf, err := h.loadChunk(ctx, start, length)
+		h.recordFetch(start, length, len(buf), time.Since(fetchStarted), err, !allowPrefetch)
+		h.finishChunkFetch(start, buf, err)
+		if err != nil {
+			return err
+		}
+		if allowPrefetch {
+			h.queueLookahead(start, int64(len(buf)))
+		}
+		return nil
+	}
+}
+
+func (h *rangeFileHandle) queueLookahead(start, fetchedLen int64) {
+	var nextSpan int64
+	windows := 0
+
+	switch fetchedLen {
+	case rangeReadProbeChunkSize:
+		nextSpan = rangeReadProbeChunkSize
+		windows = 1
+	case rangeReadChunkSize:
+		nextSpan = rangeReadChunkSize
+		windows = rangeReadLookaheadFull
+	default:
+		return
+	}
+	return h.chunkStart(h.size - 1)
+}
+
+	for i := int64(1); i <= int64(windows); i++ {
+		nextStart := start + fetchedLen*i
+		if nextStart >= h.size {
+			return
+		}
+		nextEnd := nextStart + nextSpan
+		if nextEnd > h.size {
+			nextEnd = h.size
+		}
+		h.queuePrefetch(nextStart, nextEnd)
+	}
+}
+
+func (h *rangeFileHandle) chunkCoversRange(ch *rangeChunk, needEnd int64) bool {
+	if ch == nil {
+		return false
+	}
+	return ch.end() >= needEnd
+}
+
+func (h *rangeFileHandle) nextFetchEnd(ch *rangeChunk, needEnd int64) int64 {
+	if ch == nil {
+		return needEnd
+	}
+
+	target := needEnd
+	doubleEnd := ch.start + int64(len(ch.data))*2
+	if doubleEnd > target {
+		target = doubleEnd
+	}
+	maxEnd := ch.start + rangeReadChunkSize
+	if maxEnd > h.size {
+		maxEnd = h.size
+	}
+	if target > maxEnd {
+		target = maxEnd
+	}
+	return target
+}
+
+func (h *rangeFileHandle) fetchLength(start int64, needEnd int64) int64 {
+	if needEnd <= start {
+		needEnd = start + 1
+	}
+
+	length := needEnd - start
+	if length < rangeReadProbeChunkSize {
+		length = rangeReadProbeChunkSize
+	}
+	if length > rangeReadChunkSize {
+		length = rangeReadChunkSize
+	}
 	if start+length > h.size {
 		length = h.size - start
 	}
-	buf, err := h.fetchWindow(ctx, start, length)
-	if err != nil {
-		return err
-	}
-
-	ch := &rangeChunk{
-		start:  start,
-		data:   buf,
-		pinned: start == 0 || start == h.tailChunkStart(),
-	}
-	h.touchChunk(ch)
-	h.chunks[start] = ch
-	h.evictChunks()
-	return nil
+	return length
 }
 
 func (h *rangeFileHandle) lookupChunk(off int64) *rangeChunk {
-	start := h.chunkStart(off)
-	ch, ok := h.chunks[start]
-	if !ok {
+	ch := h.lookupChunkLocked(off)
+	if ch == nil {
 		return nil
 	}
-	h.touchChunk(ch)
+	h.touchChunkLocked(ch)
 	return ch
 }
 
-func (h *rangeFileHandle) touchChunk(ch *rangeChunk) {
+func (h *rangeFileHandle) lookupChunkLocked(off int64) *rangeChunk {
+	var hit *rangeChunk
+	for _, ch := range h.chunks {
+		if ch == nil || ch.fetching {
+			continue
+		}
+		if off < ch.start || off >= ch.end() {
+			continue
+		}
+		if hit == nil || ch.useSeq > hit.useSeq {
+			hit = ch
+		}
+	}
+	return hit
+}
+
+func (h *rangeFileHandle) touchChunkLocked(ch *rangeChunk) {
 	h.useSeq++
 	ch.useSeq = h.useSeq
 }
 
-func (h *rangeFileHandle) evictChunks() {
+func (h *rangeFileHandle) finishChunkFetch(start int64, buf []byte, err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	ch, ok := h.chunks[start]
+	if !ok {
+		return
+	}
+	if err != nil {
+		delete(h.chunks, start)
+		for _, wait := range ch.waiters {
+			close(wait)
+		}
+		return
+	}
+
+	ch.data = buf
+	ch.fetching = false
+	h.touchChunkLocked(ch)
+	h.evictChunksLocked()
+	for _, wait := range ch.waiters {
+		close(wait)
+	}
+	ch.waiters = nil
+}
+
+func (h *rangeFileHandle) evictChunksLocked() {
 	for len(h.chunks) > rangeReadMaxChunks {
 		var victim *rangeChunk
 		for _, ch := range h.chunks {
-			if ch.pinned {
+			if ch.pinned || ch.fetching {
 				continue
 			}
 			if victim == nil || ch.useSeq < victim.useSeq {
@@ -1342,6 +1591,63 @@ func (h *rangeFileHandle) evictChunks() {
 		}
 		delete(h.chunks, victim.start)
 	}
+}
+
+func (h *rangeFileHandle) queuePrefetch(start, needEnd int64) {
+	if start < 0 || start >= h.size {
+		return
+	}
+	if needEnd <= start {
+		return
+	}
+	if needEnd > h.size {
+		needEnd = h.size
+	}
+
+	h.mu.Lock()
+	if ch, ok := h.chunks[start]; ok && (ch.fetching || h.chunkCoversRange(ch, needEnd)) {
+		h.mu.Unlock()
+		return
+	}
+	h.mu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		ctx = neofs.WithPrefetchRead(ctx)
+		if err := h.ensureChunk(ctx, start, needEnd, false); err != nil && h.log != nil && !isCanceledReadError(err) {
+			h.log.Debug("read: ranged prefetch failed", "path", h.path, "off", start, "err", err)
+		}
+	}()
+}
+
+func (h *rangeFileHandle) loadChunk(ctx context.Context, start, length int64) ([]byte, error) {
+	if h.sharedCache == nil || h.sharedCacheKey == "" {
+		return h.fetchWindow(ctx, start, length)
+	}
+
+	key := cache.Key(
+		h.sharedCacheKey,
+		strconv.FormatInt(start, 10),
+		strconv.FormatInt(length, 10),
+	)
+	path, _, err := h.sharedCache.GetOrFetch(ctx, key, func(ctx context.Context, w io.Writer) error {
+		buf, err := h.fetchWindow(ctx, start, length)
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(buf)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	buf, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return buf, nil
 }
 
 func (h *rangeFileHandle) fetchWindow(ctx context.Context, off, length int64) ([]byte, error) {
@@ -1375,11 +1681,124 @@ func (h *rangeFileHandle) fetchWindow(ctx context.Context, off, length int64) ([
 }
 
 func (h *rangeFileHandle) Release(ctx context.Context) syscall.Errno {
+	if h.trace && h.log != nil {
+		h.log.Info("trace: stream summary",
+			"path", h.path,
+			"size", h.size,
+			"lifetime", time.Since(h.openedAt).Round(time.Millisecond),
+			"open_to_first_read", h.firstReadDelay().Round(time.Millisecond),
+			"read_calls", h.readCalls.Load(),
+			"bytes_served", h.bytesServed.Load(),
+			"chunk_hits", h.chunkHits.Load(),
+			"chunk_misses", h.chunkMisses.Load(),
+			"chunk_waits", h.chunkWaits.Load(),
+			"demand_fetches", h.demandFetches.Load(),
+			"prefetch_fetches", h.prefetches.Load(),
+			"fetch_bytes", h.fetchBytes.Load(),
+			"fetch_time", time.Duration(h.fetchNanos.Load()).Round(time.Millisecond),
+			"avg_fetch", avgDuration(h.fetchNanos.Load(), h.demandFetches.Load()+h.prefetches.Load()).Round(time.Millisecond),
+			"max_fetch", time.Duration(h.maxFetchNanos.Load()).Round(time.Millisecond),
+		)
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.chunks = nil
 	h.useSeq = 0
 	return 0
+}
+
+func (h *rangeFileHandle) noteRead(off int64, length int) {
+	if !h.trace {
+		if off == 0 {
+			h.prefetchTail()
+		}
+		return
+	}
+	h.readCalls.Add(1)
+
+	now := time.Now().UnixNano()
+	if h.firstReadAtNs.CompareAndSwap(0, now) {
+		if off == 0 {
+			h.prefetchTail()
+		}
+		if h.log != nil {
+			h.log.Info("trace: first read",
+				"path", h.path,
+				"off", off,
+				"len", length,
+				"since_open", time.Duration(now-h.openedAt.UnixNano()).Round(time.Millisecond),
+			)
+		}
+	}
+}
+
+func (h *rangeFileHandle) prefetchTail() {
+	tail := h.tailProbeStart()
+	if tail <= 0 {
+		return
+	}
+	h.queuePrefetch(tail, h.size)
+}
+
+func (h *rangeFileHandle) recordFetch(off, length int64, got int, elapsed time.Duration, err error, prefetch bool) {
+	if !h.trace {
+		return
+	}
+	if prefetch {
+		h.prefetches.Add(1)
+	} else {
+		h.demandFetches.Add(1)
+	}
+	h.fetchBytes.Add(int64(got))
+	h.fetchNanos.Add(elapsed.Nanoseconds())
+	updateMaxAtomic(&h.maxFetchNanos, elapsed.Nanoseconds())
+	if h.log == nil {
+		return
+	}
+
+	h.log.Debug("trace: ranged fetch",
+		"path", h.path,
+		"off", off,
+		"len", length,
+		"bytes", got,
+		"prefetch", prefetch,
+		"elapsed", elapsed.Round(time.Millisecond),
+		"mib_per_sec", formatMiBPerSec(int64(got), elapsed),
+		"err", err,
+	)
+}
+
+func (h *rangeFileHandle) firstReadDelay() time.Duration {
+	if ts := h.firstReadAtNs.Load(); ts > 0 {
+		return time.Duration(ts - h.openedAt.UnixNano())
+	}
+	return 0
+}
+
+func avgDuration(totalNs, count int64) time.Duration {
+	if totalNs <= 0 || count <= 0 {
+		return 0
+	}
+	return time.Duration(totalNs / count)
+}
+
+func updateMaxAtomic(dst *atomic.Int64, value int64) {
+	for {
+		cur := dst.Load()
+		if value <= cur {
+			return
+		}
+		if dst.CompareAndSwap(cur, value) {
+			return
+		}
+	}
+}
+
+func formatMiBPerSec(bytes int64, elapsed time.Duration) float64 {
+	if bytes <= 0 || elapsed <= 0 {
+		return 0
+	}
+	return float64(bytes) / elapsed.Seconds() / (1 << 20)
 }
 
 type uploadFileHandle struct {
