@@ -1373,6 +1373,19 @@ func (h *rangeFileHandle) planFetch(off, readEnd int64) (start, needEnd int64) {
 		return start, needEnd
 	}
 
+	// If a smaller (probe-sized) chunk already exists at this offset's
+	// full-chunk boundary, expand it to cover the entire chunk window on
+	// the next touch instead of issuing a fresh probe for the tail half.
+	fullStart := h.chunkStart(off)
+	if ch, ok := h.chunks[fullStart]; ok && !ch.fetching && off >= ch.end() {
+		start = fullStart
+		needEnd = fullStart + rangeReadChunkSize
+		if needEnd > h.size {
+			needEnd = h.size
+		}
+		return start, needEnd
+	}
+
 	start = h.probeStart(off)
 	needEnd = readEnd
 	probeEnd := start + rangeReadProbeChunkSize
@@ -1445,31 +1458,32 @@ func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64, needEnd 
 }
 
 func (h *rangeFileHandle) queueLookahead(start, fetchedLen int64) {
-	var nextSpan int64
-	windows := 0
-
-	switch fetchedLen {
-	case rangeReadProbeChunkSize:
-		nextSpan = rangeReadProbeChunkSize
-		windows = 1
-	case rangeReadChunkSize:
-		nextSpan = rangeReadChunkSize
-		windows = rangeReadLookaheadFull
-	default:
+	if fetchedLen != rangeReadChunkSize {
 		return
 	}
 
-	for i := int64(1); i <= int64(windows); i++ {
+	type target struct{ start, needEnd int64 }
+	var targets []target
+	for i := int64(1); i <= int64(rangeReadLookaheadFull); i++ {
 		nextStart := start + fetchedLen*i
 		if nextStart >= h.size {
-			return
+			break
 		}
-		nextEnd := nextStart + nextSpan
+		nextEnd := nextStart + fetchedLen
 		if nextEnd > h.size {
 			nextEnd = h.size
 		}
-		h.queuePrefetch(nextStart, nextEnd)
+		targets = append(targets, target{nextStart, nextEnd})
 	}
+	if len(targets) == 0 {
+		return
+	}
+
+	go func() {
+		for _, t := range targets {
+			h.runPrefetch(t.start, t.needEnd)
+		}
+	}()
 }
 
 func (h *rangeFileHandle) chunkCoversRange(ch *rangeChunk, needEnd int64) bool {
@@ -1592,6 +1606,10 @@ func (h *rangeFileHandle) evictChunksLocked() {
 }
 
 func (h *rangeFileHandle) queuePrefetch(start, needEnd int64) {
+	go h.runPrefetch(start, needEnd)
+}
+
+func (h *rangeFileHandle) runPrefetch(start, needEnd int64) {
 	if start < 0 || start >= h.size {
 		return
 	}
@@ -1609,14 +1627,12 @@ func (h *rangeFileHandle) queuePrefetch(start, needEnd int64) {
 	}
 	h.mu.Unlock()
 
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		ctx = neofs.WithPrefetchRead(ctx)
-		if err := h.ensureChunk(ctx, start, needEnd, false); err != nil && h.log != nil && !isCanceledReadError(err) {
-			h.log.Debug("read: ranged prefetch failed", "path", h.path, "off", start, "err", err)
-		}
-	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ctx = neofs.WithPrefetchRead(ctx)
+	if err := h.ensureChunk(ctx, start, needEnd, false); err != nil && h.log != nil && !isCanceledReadError(err) {
+		h.log.Debug("read: ranged prefetch failed", "path", h.path, "off", start, "err", err)
+	}
 }
 
 func (h *rangeFileHandle) loadChunk(ctx context.Context, start, length int64) ([]byte, error) {
@@ -1706,20 +1722,12 @@ func (h *rangeFileHandle) Release(ctx context.Context) syscall.Errno {
 }
 
 func (h *rangeFileHandle) noteRead(off int64, length int) {
-	if !h.trace {
-		if off == 0 {
-			h.prefetchTail()
-		}
-		return
-	}
-	h.readCalls.Add(1)
-
 	now := time.Now().UnixNano()
-	if h.firstReadAtNs.CompareAndSwap(0, now) {
-		if off == 0 {
-			h.prefetchTail()
-		}
-		if h.log != nil {
+	first := h.firstReadAtNs.CompareAndSwap(0, now)
+
+	if h.trace {
+		h.readCalls.Add(1)
+		if first && h.log != nil {
 			h.log.Info("trace: first read",
 				"path", h.path,
 				"off", off,
@@ -1728,9 +1736,19 @@ func (h *rangeFileHandle) noteRead(off int64, length int) {
 			)
 		}
 	}
+
+	if first && off == 0 {
+		h.prefetchTail()
+	}
 }
 
 func (h *rangeFileHandle) prefetchTail() {
+	// Only warm the tail window when the file is large enough that the tail
+	// lives outside the head probe/chunk window. Smaller files are fully
+	// covered by the demand probe and an extra tail fetch is pure waste.
+	if h.size <= 2*rangeReadChunkSize {
+		return
+	}
 	tail := h.tailProbeStart()
 	if tail <= 0 {
 		return
