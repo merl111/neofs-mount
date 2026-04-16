@@ -1458,6 +1458,8 @@ func (h *rangeFileHandle) queueLookahead(start, fetchedLen int64) {
 	default:
 		return
 	}
+	return h.chunkStart(h.size - 1)
+}
 
 	for i := int64(1); i <= int64(windows); i++ {
 		nextStart := start + fetchedLen*i

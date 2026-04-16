@@ -1089,7 +1089,7 @@ func (c *Client) readObjectRangeSingleRPC(ctx context.Context, containerID cid.I
 		stats.totalElapsed = time.Since(started)
 	}()
 
-	buf := make([]byte, 0, length)
+	buf := make([]byte, 0)
 	chunk := make([]byte, 256*1024)
 	streamStarted := time.Now()
 	for {
