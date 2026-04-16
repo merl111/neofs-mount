@@ -1,6 +1,7 @@
 package neofs
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -71,5 +72,14 @@ func TestSplitObjectRange(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("splitObjectRange mismatch\ngot:  %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestShouldHedgeObjectRangeSkipsPrefetch(t *testing.T) {
+	if !shouldHedgeObjectRange(context.Background(), objectRangeHedgeMinLength) {
+		t.Fatalf("expected demand read to hedge")
+	}
+	if shouldHedgeObjectRange(WithPrefetchRead(context.Background()), objectRangeHedgeMinLength) {
+		t.Fatalf("expected prefetch read to skip hedging")
 	}
 }

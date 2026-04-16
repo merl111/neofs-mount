@@ -344,6 +344,8 @@ const (
 	objectRangeMultipartPartSize   = int64(512 << 10)
 	objectRangeMultipartMinLength  = objectRangeMultipartPartSize * 2
 	objectRangeMultipartMaxWorkers = 10
+	objectRangeHedgeDelay          = 400 * time.Millisecond
+	objectRangeHedgeMinLength      = int64(256 << 10)
 )
 
 type objectRangeRPCStats struct {
@@ -359,6 +361,15 @@ type objectRangePart struct {
 	offset int64
 	length int64
 }
+
+type objectRangeResult struct {
+	buf    []byte
+	stats  objectRangeRPCStats
+	err    error
+	source string
+}
+
+type readPrefetchContextKey struct{}
 
 // headScanCacheTTL mirrors how S3 FUSE tools like goofys handle immutable stores:
 // objects never change once written, so a long TTL only means slightly stale listings.
@@ -802,8 +813,26 @@ func (c *Client) readObjectRange(ctx context.Context, containerID cid.ID, object
 		return []byte{}, nil
 	}
 	trace := c.traceReads && c.log != nil
-	if shouldMultipartObjectRange(length) {
-		return c.readObjectRangeMultipart(ctx, containerID, objectID, offset, length, trace)
+	if shouldHedgeObjectRange(ctx, length) {
+		buf, stats, winner, hedged, err := c.readObjectRangeHedged(ctx, containerID, objectID, offset, length)
+		if trace {
+			c.log.Debug("trace: object range hedge",
+				"container", containerID.EncodeToString(),
+				"obj", objectID.EncodeToString(),
+				"off", offset,
+				"len", length,
+				"winner", winner,
+				"hedged", hedged,
+				"hedge_delay", objectRangeHedgeDelay.Round(time.Millisecond),
+				"bytes", stats.bytesRead,
+				"read_ops", stats.readOps,
+				"init_elapsed", stats.initElapsed.Round(time.Millisecond),
+				"read_elapsed", stats.readElapsed.Round(time.Millisecond),
+				"total_elapsed", stats.totalElapsed.Round(time.Millisecond),
+				"err", err,
+			)
+		}
+		return buf, err
 	}
 
 	buf, stats, err := c.readObjectRangeSingleRPC(ctx, containerID, objectID, offset, length)
@@ -824,8 +853,81 @@ func (c *Client) readObjectRange(ctx context.Context, containerID cid.ID, object
 	return buf, err
 }
 
+func shouldHedgeObjectRange(ctx context.Context, length int64) bool {
+	if length < objectRangeHedgeMinLength {
+		return false
+	}
+	return !isPrefetchRead(ctx)
+}
+
 func shouldMultipartObjectRange(length int64) bool {
 	return length >= objectRangeMultipartMinLength
+}
+
+func WithPrefetchRead(ctx context.Context) context.Context {
+	return context.WithValue(ctx, readPrefetchContextKey{}, true)
+}
+
+func isPrefetchRead(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(readPrefetchContextKey{}).(bool)
+	return v
+}
+
+func (c *Client) readObjectRangeHedged(ctx context.Context, containerID cid.ID, objectID oid.ID, offset, length int64) (_ []byte, stats objectRangeRPCStats, winner string, hedged bool, err error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	results := make(chan objectRangeResult, 2)
+	launch := func(source string) {
+		go func() {
+			buf, st, callErr := c.readObjectRangeSingleRPC(ctx, containerID, objectID, offset, length)
+			results <- objectRangeResult{
+				buf:    buf,
+				stats:  st,
+				err:    callErr,
+				source: source,
+			}
+		}()
+	}
+
+	launch("primary")
+	timer := time.NewTimer(objectRangeHedgeDelay)
+	defer timer.Stop()
+
+	pending := 1
+	var firstErr error
+	for pending > 0 {
+		select {
+		case res := <-results:
+			pending--
+			if res.err == nil {
+				cancel()
+				return res.buf, res.stats, res.source, hedged, nil
+			}
+			if firstErr == nil {
+				firstErr = res.err
+			}
+		case <-timer.C:
+			if !hedged {
+				hedged = true
+				pending++
+				launch("hedge")
+			}
+		case <-ctx.Done():
+			if firstErr != nil {
+				return nil, objectRangeRPCStats{}, "", hedged, firstErr
+			}
+			return nil, objectRangeRPCStats{}, "", hedged, ctx.Err()
+		}
+	}
+
+	if firstErr == nil {
+		firstErr = context.Canceled
+	}
+	return nil, objectRangeRPCStats{}, "", hedged, firstErr
 }
 
 func splitObjectRange(offset, length int64) []objectRangePart {

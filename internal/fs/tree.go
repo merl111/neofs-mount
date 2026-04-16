@@ -1612,6 +1612,7 @@ func (h *rangeFileHandle) queuePrefetch(start, needEnd int64) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		ctx = neofs.WithPrefetchRead(ctx)
 		if err := h.ensureChunk(ctx, start, needEnd, false); err != nil && h.log != nil && !isCanceledReadError(err) {
 			h.log.Debug("read: ranged prefetch failed", "path", h.path, "off", start, "err", err)
 		}
