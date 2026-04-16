@@ -1,6 +1,7 @@
 package neofs
 
 import (
+	"reflect"
 	"testing"
 
 	oid "github.com/nspcc-dev/neofs-sdk-go/object/id"
@@ -58,5 +59,17 @@ func TestListingTrieMatchesLinear(t *testing.T) {
 	wantRoot := listEntriesByPrefixLinear(onlyName, "")
 	if len(gotRoot) != len(wantRoot) {
 		t.Fatalf("FileName-only entries: len got %d want %d\ngot=%+v\nwant=%+v", len(gotRoot), len(wantRoot), gotRoot, wantRoot)
+	}
+}
+
+func TestSplitObjectRange(t *testing.T) {
+	got := splitObjectRange(1024, objectRangeMultipartPartSize*2+123)
+	want := []objectRangePart{
+		{index: 0, offset: 1024, length: objectRangeMultipartPartSize},
+		{index: 1, offset: 1024 + objectRangeMultipartPartSize, length: objectRangeMultipartPartSize},
+		{index: 2, offset: 1024 + objectRangeMultipartPartSize*2, length: 123},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("splitObjectRange mismatch\ngot:  %#v\nwant: %#v", got, want)
 	}
 }
