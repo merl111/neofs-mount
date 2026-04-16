@@ -23,6 +23,8 @@ import (
 	apistatus "github.com/nspcc-dev/neofs-sdk-go/client/status"
 	cid "github.com/nspcc-dev/neofs-sdk-go/container/id"
 	oid "github.com/nspcc-dev/neofs-sdk-go/object/id"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/mathias/neofs-mount/internal/audit"
 	"github.com/mathias/neofs-mount/internal/cache"
@@ -1069,18 +1071,18 @@ func (n *fileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	}
 
 	// Large-file fast path: stream directly from NeoFS without downloading the
-	// entire object first. This keeps Open() non-blocking for multi-GB files so
-	// the file explorer doesn't hang while waiting for a full download.
+	// entire object first. Serve reads through a small in-memory window so large
+	// media files remain seekable without downloading the whole object.
 	const streamThreshold = 64 << 20 // 64 MB
 	if n.fileSize >= streamThreshold {
-		_, r, err := n.neo.ObjectGet(ctx, n.cnr, n.obj)
-		if err != nil {
-			if n.log != nil {
-				n.log.Error("open: streaming ObjectGet failed", "path", n.relPath, "obj", n.obj.EncodeToString(), "err", err)
-			}
-			return nil, 0, errno(err)
-		}
-		return &streamingFileHandle{r: r, size: int64(n.fileSize)}, fuse.FOPEN_DIRECT_IO, 0
+		return &rangeFileHandle{
+			log:  n.log,
+			path: n.relPath,
+			size: int64(n.fileSize),
+			fetch: func(ctx context.Context, off, length int64) ([]byte, error) {
+				return n.neo.ReadObjectRangeIDs(ctx, n.cnr, n.obj, off, length)
+			},
+		}, fuse.FOPEN_DIRECT_IO, 0
 	}
 
 	key := cache.Key(n.cnr.EncodeToString(), n.obj.EncodeToString())
@@ -1185,58 +1187,198 @@ func (h *cachedFileHandle) Release(ctx context.Context) syscall.Errno {
 	return 0
 }
 
-// streamingFileHandle serves large-object reads directly from a NeoFS gRPC
-// stream without buffering the entire file. FOPEN_DIRECT_IO is set on open
-// so the kernel won't try random-access pread semantics.
-//
-// FUSE with DIRECT_IO issues sequential Read calls with incrementing offsets,
-// so we only need to track the current position and discard skipped bytes.
-type streamingFileHandle struct {
-	mu   sync.Mutex
-	r    io.ReadCloser
-	pos  int64 // bytes consumed from r so far
-	size int64
+const (
+	rangeReadChunkSize = int64(4 << 20)
+	rangeReadMaxChunks = 8
+)
+
+type rangeChunk struct {
+	start  int64
+	data   []byte
+	useSeq uint64
+	pinned bool
 }
 
-var _ = (fs.FileHandle)((*streamingFileHandle)(nil))
-var _ = (fs.FileReader)((*streamingFileHandle)(nil))
-var _ = (fs.FileReleaser)((*streamingFileHandle)(nil))
+// rangeFileHandle serves large-object reads through a bounded in-memory chunk cache.
+// FOPEN_DIRECT_IO keeps the kernel from caching the full file while still
+// allowing arbitrary-offset reads for media players and scanners. The first and
+// last chunks are retained across seeks to avoid MKV probe thrash between file
+// headers and cues at the tail.
+type rangeFileHandle struct {
+	log   *slog.Logger
+	path  string
+	fetch func(ctx context.Context, off, length int64) ([]byte, error)
+	size  int64
 
-func (h *streamingFileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	mu     sync.Mutex
+	chunks map[int64]*rangeChunk
+	useSeq uint64
+}
+
+var _ = (fs.FileHandle)((*rangeFileHandle)(nil))
+var _ = (fs.FileReader)((*rangeFileHandle)(nil))
+var _ = (fs.FileReleaser)((*rangeFileHandle)(nil))
+
+func (h *rangeFileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	if len(dest) == 0 || off >= h.size {
+		return fuse.ReadResultData(nil), 0
+	}
+	if off < 0 {
+		return nil, syscall.EINVAL
+	}
+
+	end := off + int64(len(dest))
+	if end < off {
+		return nil, syscall.EOVERFLOW
+	}
+	if end > h.size {
+		end = h.size
+	}
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if h.r == nil {
-		return fuse.ReadResultData(nil), 0
+	for start := h.chunkStart(off); start < end; start += rangeReadChunkSize {
+		if err := h.ensureChunk(ctx, start); err != nil {
+			if isCanceledReadError(err) {
+				if h.log != nil {
+					h.log.Debug("read: ranged fetch canceled", "path", h.path, "off", off, "len", end-off)
+				}
+				return nil, syscall.EINTR
+			}
+			if h.log != nil {
+				h.log.Error("read: ranged fetch failed", "path", h.path, "off", off, "len", end-off, "err", err)
+			}
+			return nil, errno(err)
+		}
 	}
 
-	// Discard bytes if the kernel skipped forward.
-	if off > h.pos {
-		if _, err := io.CopyN(io.Discard, h.r, off-h.pos); err != nil && !errors.Is(err, io.EOF) {
+	written := 0
+	for pos := off; pos < end; {
+		ch := h.lookupChunk(pos)
+		if ch == nil {
 			return nil, syscall.EIO
 		}
-		h.pos = off
+		chunkOff := int(pos - ch.start)
+		take := len(ch.data) - chunkOff
+		remain := int(end - pos)
+		if take > remain {
+			take = remain
+		}
+		written += copy(dest[written:written+take], ch.data[chunkOff:chunkOff+take])
+		pos += int64(take)
 	}
-	if off < h.pos {
-		// Backward seek not supported on a stream — signal EOF.
-		return fuse.ReadResultData(nil), 0
-	}
-
-	n, err := io.ReadFull(h.r, dest)
-	h.pos += int64(n)
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return nil, syscall.EIO
-	}
-	return fuse.ReadResultData(dest[:n]), 0
+	return fuse.ReadResultData(dest[:written]), 0
 }
 
-func (h *streamingFileHandle) Release(ctx context.Context) syscall.Errno {
+func (h *rangeFileHandle) chunkStart(off int64) int64 {
+	return off / rangeReadChunkSize * rangeReadChunkSize
+}
+
+func (h *rangeFileHandle) tailChunkStart() int64 {
+	if h.size <= 0 {
+		return 0
+	}
+	return h.chunkStart(h.size - 1)
+}
+
+func (h *rangeFileHandle) ensureChunk(ctx context.Context, start int64) error {
+	if ch, ok := h.chunks[start]; ok {
+		h.touchChunk(ch)
+		return nil
+	}
+	if h.chunks == nil {
+		h.chunks = make(map[int64]*rangeChunk)
+	}
+
+	length := rangeReadChunkSize
+	if start+length > h.size {
+		length = h.size - start
+	}
+	buf, err := h.fetchWindow(ctx, start, length)
+	if err != nil {
+		return err
+	}
+
+	ch := &rangeChunk{
+		start:  start,
+		data:   buf,
+		pinned: start == 0 || start == h.tailChunkStart(),
+	}
+	h.touchChunk(ch)
+	h.chunks[start] = ch
+	h.evictChunks()
+	return nil
+}
+
+func (h *rangeFileHandle) lookupChunk(off int64) *rangeChunk {
+	start := h.chunkStart(off)
+	ch, ok := h.chunks[start]
+	if !ok {
+		return nil
+	}
+	h.touchChunk(ch)
+	return ch
+}
+
+func (h *rangeFileHandle) touchChunk(ch *rangeChunk) {
+	h.useSeq++
+	ch.useSeq = h.useSeq
+}
+
+func (h *rangeFileHandle) evictChunks() {
+	for len(h.chunks) > rangeReadMaxChunks {
+		var victim *rangeChunk
+		for _, ch := range h.chunks {
+			if ch.pinned {
+				continue
+			}
+			if victim == nil || ch.useSeq < victim.useSeq {
+				victim = ch
+			}
+		}
+		if victim == nil {
+			return
+		}
+		delete(h.chunks, victim.start)
+	}
+}
+
+func (h *rangeFileHandle) fetchWindow(ctx context.Context, off, length int64) ([]byte, error) {
+	const maxAttempts = 3
+	var lastErr error
+
+	for attempt := range maxAttempts {
+		if attempt > 0 {
+			wait := time.Duration(attempt) * 500 * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(wait):
+			}
+			if h.log != nil {
+				h.log.Warn("ObjectRange retrying", "path", h.path, "off", off, "len", length, "attempt", attempt+1, "prev_err", lastErr)
+			}
+		}
+
+		buf, err := h.fetch(ctx, off, length)
+		if err == nil {
+			return buf, nil
+		}
+		lastErr = err
+		if !isRetryableStreamError(err) {
+			return nil, err
+		}
+	}
+
+	return nil, lastErr
+}
+
+func (h *rangeFileHandle) Release(ctx context.Context) syscall.Errno {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.r != nil {
-		_ = h.r.Close()
-		h.r = nil
-	}
+	h.chunks = nil
+	h.useSeq = 0
 	return 0
 }
 
@@ -1508,6 +1650,17 @@ func isRetryableStreamError(err error) bool {
 		strings.Contains(msg, "broken pipe") ||
 		strings.Contains(msg, "transport is closing") ||
 		strings.Contains(msg, "server closed the stream")
+}
+
+func isCanceledReadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	code := status.Code(err)
+	return code == codes.Canceled
 }
 
 func errno(err error) syscall.Errno {

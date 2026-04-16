@@ -28,8 +28,8 @@ import (
 type Client struct {
 	log *slog.Logger
 
-	c  *client.Client // read connection: LIST, HEAD, GET, SEARCH
-	cw *client.Client // write connection: ObjectPut only (separate from reads)
+	c      *client.Client // read connection: LIST, HEAD, GET, SEARCH
+	cw     *client.Client // write connection: ObjectPut only (separate from reads)
 	signer user.Signer
 
 	mu             sync.Mutex
@@ -328,16 +328,14 @@ func (c *Client) ContainerGet(ctx context.Context, id cid.ID) (container.Contain
 
 type SearchEntry struct {
 	ObjectID oid.ID
-	FilePath string // as stored in object.AttributeFilePath (often leading '/')
-	FileName string // as stored in object.AttributeFileName (may be empty)
-	Name     string // as stored in object.AttributeName (may be empty)
-	Key      string // S3-gateway "Key" attribute (may be empty)
-	Size     int64  // object.FilterPayloadSize if requested
-	Time     time.Time // from Timestamp or LastModified
+	FilePath string            // as stored in object.AttributeFilePath (often leading '/')
+	FileName string            // as stored in object.AttributeFileName (may be empty)
+	Name     string            // as stored in object.AttributeName (may be empty)
+	Key      string            // S3-gateway "Key" attribute (may be empty)
+	Size     int64             // object.FilterPayloadSize if requested
+	Time     time.Time         // from Timestamp or LastModified
 	Attrs    map[string]string // all object attributes
 }
-
-
 
 // headScanCacheTTL mirrors how S3 FUSE tools like goofys handle immutable stores:
 // objects never change once written, so a long TTL only means slightly stale listings.
@@ -579,7 +577,6 @@ func (c *Client) searchAllObjectIDs(ctx context.Context, cnr cid.ID) ([]oid.ID, 
 	return nil, nil
 }
 
-
 func (c *Client) entriesFromHeadsParallel(ctx context.Context, cnr cid.ID, ids []oid.ID) ([]SearchEntry, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -768,6 +765,49 @@ func (c *Client) FindObjectIDsByExactPath(ctx context.Context, cnr cid.ID, relPa
 	return out, nil
 }
 
+func (c *Client) readObjectRange(ctx context.Context, containerID cid.ID, objectID oid.ID, offset, length int64) (_ []byte, err error) {
+	if c == nil || c.c == nil {
+		return nil, errors.New("neofs: nil client")
+	}
+	if offset < 0 {
+		return nil, fmt.Errorf("neofs: negative offset %d", offset)
+	}
+	if length < 0 {
+		return nil, fmt.Errorf("neofs: negative length %d", length)
+	}
+	if length == 0 {
+		return []byte{}, nil
+	}
+
+	var prm client.PrmObjectRange
+	r, err := c.c.ObjectRangeInit(ctx, containerID, objectID, uint64(offset), uint64(length), c.signer, prm)
+	if err != nil {
+		return nil, fmt.Errorf("neofs: ObjectRange init: %w", err)
+	}
+	defer func() {
+		closeErr := r.Close()
+		if err == nil && closeErr != nil {
+			err = fmt.Errorf("neofs: ObjectRange close: %w", closeErr)
+		}
+	}()
+
+	buf := make([]byte, 0)
+	chunk := make([]byte, 256*1024)
+	for {
+		n, readErr := r.Read(chunk)
+		if n > 0 {
+			buf = append(buf, chunk[:n]...)
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("neofs: ObjectRange read: %w", readErr)
+		}
+	}
+	return buf, nil
+}
+
 // ReadObjectRange streams a byte range from a NeoFS object and returns it as a
 // slice. Used by the Windows CfApi adapter to hydrate placeholder files.
 func (c *Client) ReadObjectRange(ctx context.Context, containerIDStr, objectIDStr string, offset, length int64) ([]byte, error) {
@@ -779,30 +819,13 @@ func (c *Client) ReadObjectRange(ctx context.Context, containerIDStr, objectIDSt
 	if err := objectID.DecodeString(objectIDStr); err != nil {
 		return nil, fmt.Errorf("neofs: invalid object ID %q: %w", objectIDStr, err)
 	}
-
-	var prm client.PrmObjectRange
-	r, err := c.c.ObjectRangeInit(ctx, containerID, objectID, uint64(offset), uint64(length), c.signer, prm)
-	if err != nil {
-		return nil, fmt.Errorf("neofs: ObjectRange init: %w", err)
-	}
-
-	buf := make([]byte, 0, length)
-	chunk := make([]byte, 256*1024)
-	for {
-		n, err := r.Read(chunk)
-		if n > 0 {
-			buf = append(buf, chunk[:n]...)
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("neofs: ObjectRange read: %w", err)
-		}
-	}
-	return buf, nil
+	return c.readObjectRange(ctx, containerID, objectID, offset, length)
 }
 
+// ReadObjectRangeIDs streams a byte range from a NeoFS object identified by typed IDs.
+func (c *Client) ReadObjectRangeIDs(ctx context.Context, containerID cid.ID, objectID oid.ID, offset, length int64) ([]byte, error) {
+	return c.readObjectRange(ctx, containerID, objectID, offset, length)
+}
 
 func (c *Client) ObjectHead(ctx context.Context, containerID cid.ID, objectID oid.ID) (*object.Object, error) {
 	var prm client.PrmObjectHead
